@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "music_studio"
+version = "0.1.0"
+description = "Music Studio (音樂工坊): say what a piece of music is for and the AI writes it, or turn a song you have into what you need. Everything kept goes into the shared audio collection, for Music Box, the Video Audio Mixer and games. For *.reflex-ddns.com."
+authors = ["Milo Chen"]
+license = "MIT"
+readme = "README.md"
+packages = [{include = "music_studio"}]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.15"
+reflex = "0.10.0"
+# The producer (the AI Hub's models) and the shared collection: the app holds no model or key.
+reflex-ddns-auth = {path = "../reflex_ddns_auth", develop = true}
+numpy = ">=2.0,<3"
+httpx = ">=0.28"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+playwright = "^1.42.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
