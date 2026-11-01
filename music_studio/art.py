@@ -15,6 +15,8 @@ COLOURS = {
     "ambient": ("#0d2333", "#a8e0f0"), "tropical": ("#06332c", "#ffb347"), "desert": ("#3a1e08", "#f2c572"), "victory": ("#2e2204", "#ffe066"),
 }
 REMAKE = ("#17132e", "#b18cff")
+COLOURS["sung"] = ("#2a0f33", "#ff8fcf")
+COLOURS["cover"] = REMAKE
 
 
 def _rgb(colour: str) -> np.ndarray:

@@ -7,3 +7,4 @@ scratch folder: the suite publishes into it.
 | Suite | What it checks |
 |-------|----------------|
 | `studio_flow` | Say what a piece is for, get two takes that play, keep one, find it in the collection with its loop points, then change it into a new take. |
+| `sing_flow` | (Needs an AI Hub with the music engine; skipped without one.) A song sung by the AI from a few words, its lyrics shown, and a whole remake of a library song with an instrument in place of the singing. Several minutes. |

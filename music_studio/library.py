@@ -9,7 +9,9 @@ the usual ``duration`` and ``format``:
 - ``loop_start``, ``loop_end`` (s): a player that reaches the second may jump to the first and
   nobody hears it;
 - ``bpm``, ``key``, ``style``, ``mood``, ``words`` (what was asked for), ``model`` (who decided);
-- ``artist``: this studio, which is what Music Box and the mixer show.
+- ``artist``: this studio, which is what Music Box and the mixer show;
+- from the music engine also ``lyrics`` ("[Instrumental]" when nobody sings), ``caption`` (the music in
+  the engine's words) and ``language`` of the singing.
 
 The item's ``source`` is the studio's page. A remake says what it came from with ``derived_from``.
 """
@@ -109,7 +111,7 @@ def keep(take: dict[str, Any]) -> str:
     meta = {
         "duration": take["seconds"],
         "format": "mp3",
-        **{k: take.get(k, "") for k in ("origin", "rights", "bpm", "key", "style", "mood", "words", "model", "why", "loop_start", "loop_end")},
+        **{k: take.get(k, "") for k in ("origin", "rights", "bpm", "key", "style", "mood", "words", "model", "why", "loop_start", "loop_end", "lyrics", "caption", "language")},
     }
     title = take.get("title") or "New piece"
     derived = [take["from_ref"]] if take.get("from_ref") else []

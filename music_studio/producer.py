@@ -4,6 +4,11 @@ an answer that doesn't read, keywords choose instead, so a piece always comes.
 
 The same for changing a song: the model is told what was measured in it (tempo, key) and what the
 person asked for, and answers with how to change it (``remake.Plan``).
+
+With the music engine (ACE-Step through the hub, ``reflex_ddns_auth.ai.music``) the model writes
+the song instead: a caption in the engine's words, the lyrics in the language asked for, and for
+a remake the new version's caption and how far from the recording to go (``song_for``,
+``cover_for``); the engine sings and plays it.
 """
 
 from __future__ import annotations
@@ -22,7 +27,10 @@ from music_studio.remake import BEATS, TONES, Plan
 
 logger = logging.getLogger(__name__)
 ROLE = "smart"
-USES = {ROLE: "The producer: reads what a piece is for and decides its style, tempo, key and chords, or how to change a song"}
+USES = {
+    ROLE: "The producer: reads what a piece is for and decides its style, tempo, key and chords, or how to change a song; with the music engine, it writes the lyrics and the song's description",
+    "music": "Songs with singing, and remaking a recording (new style, without the singing or with an instrument in its place)",
+}
 MAX_TOKENS = 12000  # thinking models spend most of these before they answer
 LEADS = [p for p in PATCHES if p.startswith("lead_")]
 
@@ -52,6 +60,42 @@ how a program changes it, so answer with one JSON object and nothing else:
   "beat": one of {list(BEATS)} ("none" keeps the song's own drums alone),
   "energy": 0.0 to 1.0, how busy the new drums are,
   "why": "one sentence in the person's language on why this fits"}}"""
+
+SONG_SYSTEM = """You are a songwriter and producer. A person says what a song is for; a music model (ACE-Step) will sing and play it from your words, so write for it.
+Answer with one JSON object and nothing else:
+{"title": "a short title in the person's language",
+  "caption": "the music in English as comma-separated tags: genre, mood, tempo feel, main instruments, the singer's voice (e.g. 'female vocal', 'male vocal', 'duet') and production style; under 60 words",
+  "lyrics": "the whole lyrics in the language asked for, with section tags on their own lines ([Verse 1], [Chorus], [Verse 2], [Bridge], [Outro]); about 8 lines per 30 seconds; no chords, no notes to the reader",
+  "language": "the lyrics' language as a code: zh, en, ja, ko, es, fr, de, it, pt, ru",
+  "bpm": whole number,
+  "duration": whole seconds, 30 to 240,
+  "why": "one sentence in the person's language on your choices"}
+For a piece without singing, lyrics is exactly "[Instrumental]" and the caption says instrumental."""
+
+COVER_SYSTEM = """You are a remix producer. A music model (ACE-Step) will remake an existing recording from your words: it keeps the recording's structure and melody as far as the cover strength allows, and plays and sings the new version.
+Answer with one JSON object and nothing else:
+{"title": "a short title in the person's language",
+  "caption": "the new version's music in English as comma-separated tags: genre, mood, tempo feel, instruments, the voice (or 'instrumental, no vocals' when the singing must go; name the instrument that takes the melody when it is to be played instead of sung)",
+  "lyrics": "exactly [Instrumental] when the singing must go or be played by an instrument; else the lyrics the person gave, or an empty string",
+  "cover_strength": a number from 0.2 to 1.0 (0.2 to 0.4 keeps the recording and changes its sound, 0.5 to 0.7 changes the arrangement too, 0.8 to 1.0 keeps only the song's bones),
+  "why": "one sentence in the person's language on your choices"}"""
+
+# Each style's caption for the engine, when there is no model to write one.
+CAPTIONS = {
+    "synthwave": "synthwave, retro 80s, driving, pulsing synth bass, gated drums, neon night",
+    "dnb": "drum and bass, fast breakbeats, deep sub bass, tense, energetic",
+    "chiptune": "chiptune, 8-bit, bright, playful, arcade, fast",
+    "rock": "rock, electric guitars, driving drums, energetic",
+    "house": "house, four on the floor, warm chords, groovy, club",
+    "techno": "techno, dark, hypnotic, hard kick, minimal",
+    "orchestral": "epic orchestral, strings, brass, taiko drums, cinematic",
+    "lofi": "lo-fi hip hop, warm, dusty drums, mellow electric piano, relaxed",
+    "ambient": "ambient, calm, soft pads, slow, spacious",
+    "tropical": "tropical house, bright, marimba, warm, beach sunset",
+    "desert": "middle eastern, oud, driving percussion, cinematic, desert",
+    "victory": "triumphant, fanfare, orchestral brass, uplifting, celebration",
+}
+LANGUAGES = ("zh", "en", "ja", "ko", "es", "fr", "de", "it", "pt", "ru")
 
 # When there is no model to ask: words to a style. The first that matches wins.
 KEYWORDS: tuple[tuple[tuple[str, ...], dict[str, Any]], ...] = (
@@ -199,3 +243,74 @@ async def plan_for(words: str, facts: str, title: str, user: str = "") -> tuple[
     except ai.HubUnavailable as e:
         logger.info("No producer: %s", e)
     return plan_from(data, fallback, title), model if data else "", str(data.get("why") or "")[:200]
+
+
+# ------------------------------------------------------------ with the music engine
+
+
+def _lyrics(text: Any, instrumental: bool) -> str:
+    words = str(text or "").strip()
+    if instrumental or not words or words.lower() in ("[instrumental]", "[inst]", "instrumental"):
+        return "[Instrumental]"
+    return words[:4000]
+
+
+async def song_for(words: str, lang: str, lyrics_lang: str, instrumental: bool, seconds: int, user: str = "") -> tuple[dict[str, Any], str, str, str]:
+    """What to ask the engine for: (spec, title, who decided, why). Without a model the words
+    become the caption as they are, and the piece has no singing (nobody wrote lyrics)."""
+    fallback = guess(words, lang)
+    want = lyrics_lang if lyrics_lang in LANGUAGES else ("zh" if lang == "zh" else "en")
+    data: dict[str, Any] = {}
+    model = ""
+    asking = f"{words}\n(Lyrics in: {want}. Length: about {seconds} seconds.{' No singing: an instrumental piece.' if instrumental else ''})"
+    try:
+        reply = ai.stream(ROLE, SONG_SYSTEM, [{"role": "user", "content": asking}], max_tokens=MAX_TOKENS, user=user)
+        text = "".join([piece async for piece in reply])
+        model = reply.model
+        data = read_json(text)
+        if not data:
+            logger.warning("The songwriter gave no song (stop: %s): %r", reply.stop, text[:200])
+    except ai.HubUnavailable as e:
+        logger.info("No songwriter: %s", e)
+    caption = str(data.get("caption") or f"{CAPTIONS.get(fallback['style'], '')}, {words}")[:600]
+    lyrics = _lyrics(data.get("lyrics"), instrumental or not data)
+    if lyrics == "[Instrumental]" and "instrumental" not in caption.lower():
+        caption = "instrumental, " + caption
+    spec = {
+        "caption": caption,
+        "lyrics": lyrics,
+        "language": data.get("language") if data.get("language") in LANGUAGES else want,
+        "duration": int(_number(data.get("duration"), 30, 240, seconds)),
+    }
+    bpm = _number(data.get("bpm"), 40, 220, 0)
+    if bpm:
+        spec["bpm"] = int(bpm)
+    title = str(data.get("title") or fallback.get("title") or "")[:60]
+    return spec, title, model if data else "", str(data.get("why") or "")[:200]
+
+
+async def cover_for(words: str, facts: str, title: str, vocals: str, user: str = "") -> tuple[dict[str, Any], str, str, str]:
+    """How the engine remakes a recording: (spec without the audio, title, who decided, why).
+    ``vocals``: keep, remove or instrument (the melody played instead of sung)."""
+    data: dict[str, Any] = {}
+    model = ""
+    wish = {"remove": " Take the singing out: an instrumental version.", "instrument": " Take the singing out and let an instrument play its melody."}.get(vocals, "")
+    try:
+        reply = ai.stream(ROLE, COVER_SYSTEM, [{"role": "user", "content": f"The recording: {facts}\nWhat the person wants: {words}{wish}"}], max_tokens=MAX_TOKENS, user=user)
+        text = "".join([piece async for piece in reply])
+        model = reply.model
+        data = read_json(text)
+        if not data:
+            logger.warning("The remix producer gave no plan (stop: %s): %r", reply.stop, text[:200])
+    except ai.HubUnavailable as e:
+        logger.info("No remix producer: %s", e)
+    caption = str(data.get("caption") or words)[:600]
+    if vocals != "keep" and "instrumental" not in caption.lower():
+        caption = "instrumental, no vocals, " + caption
+    spec = {
+        "task": "cover",
+        "caption": caption,
+        "lyrics": _lyrics(data.get("lyrics"), vocals != "keep"),
+        "cover_strength": _number(data.get("cover_strength"), 0.2, 1.0, 0.6 if vocals == "keep" else 0.8),
+    }
+    return spec, str(data.get("title") or title)[:60], model if data else "", str(data.get("why") or "")[:200]

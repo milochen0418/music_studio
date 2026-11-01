@@ -10,15 +10,17 @@ Say what a piece of music is for and the AI writes it, or turn a song you have i
 
 Everything made loops without a seam: `loop_start` and `loop_end` in the item's `meta` say where to jump.
 
-## What this is not
+## With the music engine: singing, and whole remakes
 
-It is instrumental: no singing. Changing a song doesn't touch its notes or separate its instruments. For that, a music model such as ACE-Step would have to run on the host and be offered through the AI Hub.
+The composer here plays instruments only. For a song with singing, or to remake a recording outright (a new style, without the singing, an instrument playing its melody), the studio asks the AI Hub for the **music engine**, ACE-Step on the Mac (installed from the hub's page or with re_ddns's `macos_music_engine.sh`; see re_ddns's README). The hub's model then writes the lyrics and the song's description, the engine sings and plays it, and the take comes back here like any other. Without the engine those options are greyed out and the page says why.
+
+What the engine's songs are not: they don't loop without a seam (a game starts them again), and a remake of someone else's recording stays theirs (`rights: third-party`).
 
 A song someone else wrote stays theirs when changed: such takes are marked `rights: third-party` and shown as for your own use. Get permission before putting one in a public game or video.
 
 ## How it is built
 
-- `music_studio/producer.py`: what the model is told and how its answer is read. With no hub, or no answer, your words choose the style, so a piece always comes.
+- `music_studio/producer.py`: what the model is told and how its answer is read. With no hub, or no answer, your words choose the style, so a piece always comes. `song_for` and `cover_for` write for the engine (`reflex_ddns_auth.ai.music`).
 - `music_studio/composer/`: `theory.py` (scales, chords), `styles.py` (how each style is played), `arrange.py` (writes the parts), `synth.py` (instruments as sums of sine waves, drums), `render.py` (plays and masters the score). The same brief and seed give the same samples.
 - `music_studio/remake.py`: tempo and key finding, and the changes.
 - `music_studio/drafts.py`, `library.py`: takes until they are kept, then `audio.file` items.

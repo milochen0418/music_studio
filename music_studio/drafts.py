@@ -15,7 +15,7 @@ from typing import Any
 
 from music_studio import art
 from music_studio.composer import Brief, compose
-from music_studio.remake import Analysis, Plan, remake
+from music_studio.remake import Analysis, Plan, decode, remake
 
 KEEP = 24
 
@@ -93,6 +93,38 @@ def take_remade(path: Path, plan: Plan, bars: int, analysis: Analysis, source: d
         },
         "remake",
     )
+
+
+class _Made:
+    """A finished song from the engine, as ``_save`` takes it."""
+
+    def __init__(self, mp3: bytes):
+        self.mp3 = mp3
+        self.audio = None
+        self.loop = (0.0, 0.0)  # the engine's songs end; a player starts them again
+
+    @property
+    def seconds(self) -> float:
+        return self.audio.shape[0] / 44100
+
+    def save(self, path: Path) -> Path:
+        path.write_bytes(self.mp3)
+        return path
+
+
+def take_engine(mp3: bytes, info: dict[str, Any]) -> dict[str, Any]:
+    """Keeps what the engine made: ``info`` says what it is (origin sung or cover, rights, title,
+    words, model, why, the spec it was made from, what it came from)."""
+    made = _Made(mp3)
+    folder = _root() / "incoming"
+    folder.mkdir(exist_ok=True)
+    tmp = folder / f"{secrets.token_hex(4)}.mp3"
+    tmp.write_bytes(mp3)
+    try:
+        made.audio = decode(tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return _save(made, {"style": "", "bpm": 0, "key": "", "mood": "", "seed": 0, **info}, info.get("origin") or "sung")
 
 
 def info(draft: str) -> dict[str, Any] | None:

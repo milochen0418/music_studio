@@ -45,6 +45,57 @@ def _tab(name: str, words, icon: str) -> rx.Component:
     )
 
 
+def _choice(testid: str, chosen, value: str, words, pick, disabled=None, tip=None) -> rx.Component:
+    on = chosen == value
+    return rx.el.button(
+        words,
+        on_click=pick(value),
+        disabled=disabled,
+        title=tip,
+        data_testid=f"{testid}-{value}",
+        class_name=rx.cond(on, f"{BUTTON} bg-slate-100 text-slate-950 disabled:opacity-40", f"{BUTTON} border border-slate-700 text-slate-300 hover:border-slate-500 disabled:opacity-40"),
+    )
+
+
+def _engine_banner() -> rx.Component:
+    return rx.cond(
+        Studio.engine_ok,
+        rx.el.p(rx.icon("mic-vocal", size=14, class_name="mr-1 inline align-[-2px] text-emerald-300"), Studio.engine_words, data_testid="engine", class_name="mt-3 text-xs text-slate-400"),
+        rx.el.div(
+            rx.icon("info", size=16, class_name="mt-0.5 shrink-0 text-amber-300"),
+            rx.el.div(
+                rx.el.span(Studio.engine_words, data_testid="engine"),
+                rx.cond(Studio.hub_page != "", rx.el.a(T["open_hub"], " →", href=Studio.hub_page, target="_blank", class_name="ml-2 text-amber-300 hover:underline")),
+                class_name="text-sm leading-relaxed text-amber-100/90",
+            ),
+            class_name="mt-3 flex gap-2 rounded-xl border border-amber-400/30 bg-amber-950/40 px-3 py-2",
+        ),
+    )
+
+
+def _voice() -> rx.Component:
+    return rx.el.div(
+        rx.el.span(T["voice"], class_name="mr-1 text-xs text-slate-400"),
+        _choice("voice", Studio.voice, "none", T["voice_none"], Studio.set_voice),
+        _choice("voice", Studio.voice, "sing", T["voice_sing"], Studio.set_voice, disabled=~Studio.engine_ok, tip=T["voice_tip"]),
+        rx.cond(
+            Studio.voice == "sing",
+            rx.el.select(
+                rx.el.option(T["lang_zh"], value="zh"),
+                rx.el.option(T["lang_en"], value="en"),
+                rx.el.option(T["lang_ja"], value="ja"),
+                rx.el.option(T["lang_ko"], value="ko"),
+                value=rx.cond(Studio.lyrics_lang != "", Studio.lyrics_lang, rx.cond(Studio.lang == "zh", "zh", "en")),
+                on_change=Studio.set_lyrics_lang,
+                data_testid="lyrics-lang",
+                class_name=f"{INPUT} w-auto",
+                title=T["lyrics_lang"],
+            ),
+        ),
+        class_name="mt-4 flex flex-wrap items-center gap-2",
+    )
+
+
 def _length() -> rx.Component:
     return rx.el.label(
         rx.el.span(T["length"], class_name="mb-1 block text-xs text-slate-400"),
@@ -66,6 +117,7 @@ def _compose() -> rx.Component:
         rx.el.label(T["words"], html_for="words", class_name="font-semibold"),
         rx.el.textarea(id="words", value=Studio.words, on_change=Studio.set_words, placeholder=T["words_hint"], rows=3, data_testid="words", class_name=f"{INPUT} mt-2 resize-y"),
         rx.el.div(rx.foreach(Studio.scenes, lambda s: rx.el.button(s, on_click=Studio.use_scene(s), class_name="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-amber-400")), class_name="mt-3 flex flex-wrap gap-2"),
+        _voice(),
         rx.el.div(
             rx.el.label(
                 rx.el.span(T["style"], class_name="mb-1 block text-xs text-slate-400"),
@@ -118,6 +170,22 @@ def _remake() -> rx.Component:
             rx.cond(Studio.upload != "", rx.el.span(rx.icon("circle-check", size=15, class_name="text-amber-400"), Studio.source_title, class_name="inline-flex items-center gap-1.5 text-sm text-slate-300")),
             class_name="mt-3 flex flex-wrap items-center gap-2",
         ),
+        rx.el.div(
+            rx.el.span(T["method"], class_name="mr-1 text-xs text-slate-400"),
+            _choice("method", rx.cond(Studio.remaking, "remake", "tweak"), "tweak", T["method_tweak"], Studio.set_method),
+            _choice("method", rx.cond(Studio.remaking, "remake", "tweak"), "remake", T["method_remake"], Studio.set_method, disabled=~Studio.engine_ok, tip=T["method_tip"]),
+            class_name="mt-4 flex flex-wrap items-center gap-2",
+        ),
+        rx.cond(
+            Studio.remaking,
+            rx.el.div(
+                rx.el.span(T["vocals"], class_name="mr-1 text-xs text-slate-400"),
+                _choice("vocals", Studio.vocals, "keep", T["vocals_keep"], Studio.set_vocals),
+                _choice("vocals", Studio.vocals, "remove", T["vocals_remove"], Studio.set_vocals),
+                _choice("vocals", Studio.vocals, "instrument", T["vocals_instrument"], Studio.set_vocals),
+                class_name="mt-2 flex flex-wrap items-center gap-2",
+            ),
+        ),
         rx.el.label(T["how"], html_for="how", class_name="mt-4 block font-semibold"),
         rx.el.textarea(id="how", value=Studio.how, on_change=Studio.set_how, placeholder=T["how_hint"], rows=2, data_testid="how", class_name=f"{INPUT} mt-2 resize-y"),
         rx.el.div(_length(), class_name="mt-3 flex max-w-xs"),
@@ -134,14 +202,17 @@ def _take(row: Take) -> rx.Component:
             rx.el.div(
                 rx.el.div(row.title, class_name="truncate font-semibold"),
                 rx.el.div(row.key, " · ", row.bpm.to(str), " BPM · ", row.clock, class_name="text-xs text-slate-400"),
-                rx.el.div(rx.icon("repeat", size=12), T["loops"], class_name="mt-0.5 inline-flex items-center gap-1 text-[11px] text-emerald-300"),
+                rx.cond(row.loops, rx.el.div(rx.icon("repeat", size=12), T["loops"], class_name="mt-0.5 inline-flex items-center gap-1 text-[11px] text-emerald-300")),
                 class_name="min-w-0 flex-1",
             ),
             class_name="flex items-center gap-3",
         ),
         rx.image(src=row.wave, alt="", class_name="mt-3 h-8 w-full opacity-70"),
         rx.el.audio(src=BACKEND + "/_studio/take/" + row.id + ".mp3", controls=True, preload="none", class_name="mt-2 h-9 w-full"),
+        rx.cond(row.origin == "sung", rx.el.p(rx.icon("mic-vocal", size=12, class_name="mr-1 inline align-[-1px]"), T["sung"], class_name="mt-2 text-xs text-pink-300")),
+        rx.cond(row.origin == "cover", rx.el.p(rx.icon("wand-sparkles", size=12, class_name="mr-1 inline align-[-1px]"), T["cover"], class_name="mt-2 text-xs text-violet-300")),
         rx.cond(row.why != "", rx.el.p("“", row.why, "”", class_name="mt-2 text-sm italic text-slate-300")),
+        rx.cond(row.lyrics != "", rx.el.details(rx.el.summary("♪ ", T["lyrics"], class_name="cursor-pointer text-xs text-slate-400"), rx.el.pre(row.lyrics, class_name="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap font-sans text-xs text-slate-300"), class_name="mt-2")),
         rx.cond(row.from_title != "", rx.el.p(T["from"], " ", row.from_title, class_name="mt-1 truncate text-xs text-slate-400")),
         rx.cond(row.rights != "own", rx.el.p(rx.icon("triangle-alert", size=12, class_name="mr-1 inline align-[-1px]"), T["rights_mark"], class_name="mt-1 text-xs text-amber-300")),
         rx.el.div(
@@ -161,6 +232,7 @@ def _take(row: Take) -> rx.Component:
 def _body() -> rx.Component:
     return rx.el.div(
         rx.el.div(_tab("compose", T["tab_compose"], "sparkles"), _tab("remake", T["tab_remake"], "wand-sparkles"), class_name="flex flex-wrap gap-2 rounded-2xl border border-white/10 bg-slate-900/70 p-1.5"),
+        _engine_banner(),
         rx.el.div(rx.cond(Studio.tab == "compose", _compose(), _remake()), class_name="mt-4"),
         rx.cond(Studio.error != "", rx.el.p(Studio.error, data_testid="error", class_name="mt-3 rounded-xl bg-rose-950/60 px-3 py-2 text-sm text-rose-200")),
         rx.cond(Studio.busy, rx.el.p(rx.spinner(size="2"), Studio.stage, data_testid="stage", class_name="mt-3 flex items-center gap-2 text-sm text-slate-300")),
