@@ -115,7 +115,8 @@ def _length() -> rx.Component:
 def _compose() -> rx.Component:
     return rx.el.div(
         rx.el.label(T["words"], html_for="words", class_name="font-semibold"),
-        rx.el.textarea(id="words", value=Studio.words, on_change=Studio.set_words, placeholder=T["words_hint"], rows=3, data_testid="words", class_name=f"{INPUT} mt-2 resize-y"),
+        # The box keeps its own text: a value written back per key cuts Chinese input off.
+        rx.el.textarea(id="words", default_value=Studio.words, on_change=Studio.set_words, placeholder=T["words_hint"], rows=3, data_testid="words", class_name=f"{INPUT} mt-2 resize-y"),
         rx.el.div(rx.foreach(Studio.scenes, lambda s: rx.el.button(s, on_click=Studio.use_scene(s), class_name="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-amber-400")), class_name="mt-3 flex flex-wrap gap-2"),
         _voice(),
         rx.el.div(
@@ -187,7 +188,7 @@ def _remake() -> rx.Component:
             ),
         ),
         rx.el.label(T["how"], html_for="how", class_name="mt-4 block font-semibold"),
-        rx.el.textarea(id="how", value=Studio.how, on_change=Studio.set_how, placeholder=T["how_hint"], rows=2, data_testid="how", class_name=f"{INPUT} mt-2 resize-y"),
+        rx.el.textarea(id="how", default_value=Studio.how, on_change=Studio.set_how, placeholder=T["how_hint"], rows=2, data_testid="how", class_name=f"{INPUT} mt-2 resize-y"),
         rx.el.div(_length(), class_name="mt-3 flex max-w-xs"),
         rx.el.p(rx.icon("info", size=14, class_name="mr-1 inline align-[-2px]"), T["rights_note"], class_name="mt-3 text-xs leading-relaxed text-amber-200/80"),
         rx.el.button(rx.icon("wand-sparkles", size=16), rx.cond(Studio.busy, T["making"], T["change"]), on_click=Studio.change, disabled=Studio.busy, data_testid="change", class_name=f"{PRIMARY} mt-4"),

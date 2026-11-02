@@ -21,6 +21,17 @@ with sync_playwright() as pw:
     assert page.locator("h2").first.inner_text() == "作好的版本"
     page.click("[data-testid=make]")
     wait_for(lambda: page.locator("[data-testid=error]").count() == 1, "asks what it is for")
+    page.locator("[data-testid=words] ~ div button").first.click()
+    wait_for(lambda: page.input_value("[data-testid=words]") != "", "a scene fills the box")
+    page.fill("[data-testid=words]", "")
+    page.click("[data-testid=words]")
+    ime = page.context.new_cdp_session(page)
+    for typed in ("ㄋ", "ㄋㄧ", "ㄋㄧˇ"):
+        ime.send("Input.imeSetComposition", {"text": typed, "selectionStart": len(typed), "selectionEnd": len(typed)})
+        page.wait_for_timeout(350)
+    assert page.input_value("[data-testid=words]") == "ㄋㄧˇ", page.input_value("[data-testid=words]")
+    ime.send("Input.insertText", {"text": "你"})
+    wait_for(lambda: page.input_value("[data-testid=words]") == "你", "Chinese typed through the IME")
     page.fill("[data-testid=words]", "夜間霓虹賽道的最後一圈")
     page.select_option("[data-testid=length]", "short")
     page.click("[data-testid=make]")

@@ -178,6 +178,7 @@ class Studio(rx.State):
         self.words = str(params.get("words") or "")
         self.style = str(params.get("style") or "auto")
         self.takes = []
+        yield rx.set_value("words", self.words)
 
     @rx.event
     def switch_lang(self):
@@ -209,6 +210,7 @@ class Studio(rx.State):
     @rx.event
     def use_scene(self, scene: str):
         self.words = scene
+        yield rx.set_value("words", scene)
 
     @rx.event
     def set_voice(self, value: str):
