@@ -12,11 +12,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Any
 
+import numpy as np
 import reflex as rx
 from reflex_ddns_auth import ai
 from reflex_ddns_auth.intent import IntentPage, intent_update
 
-from music_studio import drafts, library, producer, remake
+from music_studio import drafts, library, lyrics, producer, remake, video
 from music_studio.i18n import SCENES, STYLE_NAMES, TEXT
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class Take:
     ref: str
     lyrics: str
     loops: bool
+    has_video: bool = False  # rows kept in a session from before videos have none
 
 
 def _clock(seconds: float) -> str:
@@ -69,6 +71,7 @@ def _row(found: dict[str, Any]) -> Take:
         ref=found.get("ref") or "",
         lyrics="" if (found.get("lyrics") or "").strip().lower() in ("", "[instrumental]") else str(found.get("lyrics")),
         loops=float(found.get("loop_end") or 0) > 0,
+        has_video=video.path(found["id"]) is not None,
     )
 
 
@@ -457,3 +460,293 @@ def _clean_meta(value: Any) -> str:
 
 def _clean_title(title: str) -> str:
     return re.sub(r"\.(mp3|wav|m4a|flac|ogg)$", "", title or "", flags=re.IGNORECASE)
+
+
+# ------------------------------------------------------------------ Make Video
+
+PLAYER = "document.getElementById('mv-audio')"
+
+
+def _play_from(at: float) -> str:
+    return f"(() => {{ const a = {PLAYER}; if (a) {{ a.currentTime = {max(0.0, at):.2f}; a.play(); }} }})()"
+
+
+@dataclasses.dataclass
+class Cue:
+    at: float
+    clock: str
+    line: str
+
+
+def _cues(lines: list[lyrics.Line]) -> list[Cue]:
+    return [Cue(round(line.at, 2), lyrics.clock(line.at), line.text) for line in lines]
+
+
+def _at(cue: Cue, at: float, seconds: float) -> Cue:
+    at = round(min(max(0.0, at), seconds or at), 2)
+    return Cue(at, lyrics.clock(at), cue.line)
+
+
+def _about(take: dict[str, Any], lang: str) -> str:
+    """The video's small line: what kind of music, its tempo and key."""
+    t = TEXT.get(lang, TEXT["zh"])
+    kind = {"sung": t["sung"], "cover": t["cover"]}.get(take.get("origin") or "") or STYLE_NAMES.get(lang, STYLE_NAMES["zh"]).get(take.get("style") or "", "")
+    bpm = _whole(take.get("bpm"))
+    key = str(take.get("key") or "").replace("♭", "b").replace("♯", "#")  # not in every font
+    return " · ".join(part for part in (kind, f"{bpm} BPM" if bpm else "", key) if part)
+
+
+def _guessed(draft: str, words: str) -> tuple[list[lyrics.Line], float]:
+    """A first guess at when each line of ``words`` is sung in the take, and the take's length."""
+    path = drafts.audio_path(draft)
+    if path is None:
+        return [], 0.0
+    rate, step = 8000, 4000  # the level every half second is enough
+    mono = remake.decode(path, rate, 1).ravel()
+    level = np.sqrt((mono[: mono.size // step * step].reshape(-1, step) ** 2).mean(axis=1))
+    seconds = mono.size / rate
+    return lyrics.guess(words, seconds, level, step / rate), seconds
+
+
+class Video(Studio):
+    """Make Video: a take as a 1080p MP4 for YouTube, with its lyrics timed by ear."""
+
+    film: str = ""  # the take whose video is open
+    film_open: bool = False
+    film_title: str = ""
+    film_artist: str = ""
+    film_about: str = ""
+    look: str = "bars"
+    motion: bool = True
+    show_lyrics: bool = True
+    cues: list[Cue] = []
+    timed: str = ""  # where the times came from: guess, lrc, tap, hand, saved
+    tap: int = -1  # the line the next tap times; -1 when nobody is tapping
+    lrc: str = ""
+    lrc_open: bool = False
+    seconds: float = 0.0
+    rendering: str = ""  # the take whose video is being made
+    progress: int = 0
+    film_error: str = ""
+    made: dict[str, Any] = {}  # what the open take's video was made with
+    _words: str = ""  # the take's lyrics as they came, tags and all
+
+    @rx.var
+    def film_version(self) -> str:
+        return str(self.made.get("made") or "")
+
+    @rx.var
+    def film_size(self) -> str:
+        size = float(self.made.get("bytes") or 0)
+        return f"{size / 1e6:.0f} MB" if size else ""
+
+    @rx.var
+    def tap_line(self) -> str:
+        return self.cues[self.tap].line if 0 <= self.tap < len(self.cues) else ""
+
+    @rx.var
+    def tap_place(self) -> str:
+        return _fill(self.t["tap_place"], n=self.tap + 1, all=len(self.cues)) if self.tap >= 0 else ""
+
+    @rx.var
+    def film_stage(self) -> str:
+        return _fill(self.t["film_making"], p=self.progress)
+
+    @rx.var
+    def timed_words(self) -> str:
+        return self.t.get(f"timed_{self.timed}", "") if self.cues else self.t["no_lyrics"]
+
+    @rx.event
+    async def open_film(self, draft: str):
+        if draft != self.film:
+            take = drafts.info(draft)
+            if take is None:
+                return rx.toast.error(self.t["gone"])
+            self.film, self.tap, self.lrc_open, self.film_error = draft, -1, False, ""
+            saved = video.settings(draft) or {}
+            self._words = "" if str(take.get("lyrics") or "").strip().lower() == "[instrumental]" else str(take.get("lyrics") or "")
+            lines, self.seconds = await asyncio.to_thread(_guessed, draft, self._words)
+            self.made = saved
+            self.film_title = str(saved.get("title") or take.get("title") or "")
+            self.film_artist = str(saved.get("artist") or library.MAKER)
+            self.film_about = str(saved.get("about") if "about" in saved else _about(take, self.lang))
+            self.look = saved.get("look") if saved.get("look") in video.LOOKS else "bars"
+            self.motion = bool(saved.get("motion", True))
+            if saved.get("lines"):
+                lines = [lyrics.Line(float(at), str(text)) for at, text in saved["lines"]]
+            self.cues = _cues(lines)
+            self.show_lyrics = bool(saved.get("lyrics", True)) and bool(lines)
+            self.timed = "saved" if saved.get("lines") else "guess"
+        self.film_open = True
+        return None
+
+    @rx.event
+    def close_film(self):
+        self.film_open, self.tap = False, -1
+
+    @rx.event
+    def set_film_title(self, value: str):
+        self.film_title = value
+
+    @rx.event
+    def set_film_artist(self, value: str):
+        self.film_artist = value
+
+    @rx.event
+    def set_film_about(self, value: str):
+        self.film_about = value
+
+    @rx.event
+    def set_look(self, value: str):
+        self.look = value if value in video.LOOKS else "bars"
+
+    @rx.event
+    def set_motion(self, value: str):
+        self.motion = value == "on"
+
+    @rx.event
+    def set_show_lyrics(self, value: str):
+        self.show_lyrics = value == "on" and bool(self.cues)
+
+    # ---------------------------------------------- the lyrics' times
+
+    @rx.event
+    def nudge(self, index: int, delta: float):
+        if 0 <= index < len(self.cues):
+            self.cues[index] = _at(self.cues[index], self.cues[index].at + delta, self.seconds)
+            self.timed = "hand"
+
+    @rx.event
+    def shift(self, delta: float):
+        self.cues = [_at(cue, cue.at + delta, self.seconds) for cue in self.cues]
+        self.timed = "hand"
+
+    @rx.event
+    def stamp(self, index: int, at: float):
+        """A line starts where the player is."""
+        if 0 <= index < len(self.cues):
+            self.cues[index] = _at(self.cues[index], at, self.seconds)
+            self.timed = "hand"
+
+    @rx.event
+    def play_from(self, index: int):
+        if 0 <= index < len(self.cues):
+            return rx.call_script(_play_from(self.cues[index].at - 0.5))
+        return None
+
+    @rx.event
+    def tap_start(self):
+        if not self.cues:
+            return None
+        self.tap, self.lrc_open = 0, False
+        return rx.call_script(_play_from(0))
+
+    @rx.event
+    def tap_mark(self, at: float):
+        """The line waiting for its tap starts now."""
+        if not 0 <= self.tap < len(self.cues):
+            return None
+        self.cues[self.tap] = _at(self.cues[self.tap], at, self.seconds)
+        self.timed = "tap"
+        self.tap += 1
+        if self.tap >= len(self.cues):
+            self.tap = -1
+            return [rx.call_script(f"{PLAYER}?.pause()"), rx.toast.success(self.t["tap_finished"])]
+        return None
+
+    @rx.event
+    def tap_back(self):
+        """One line back, and the music a little before it, to tap it again."""
+        if self.tap > 0:
+            self.tap -= 1
+            before = self.cues[self.tap - 1].at if self.tap > 0 else self.cues[self.tap].at - 3
+            return rx.call_script(_play_from(before))
+        return None
+
+    @rx.event
+    def tap_stop(self):
+        self.tap = -1
+        return rx.call_script(f"{PLAYER}?.pause()")
+
+    @rx.event
+    async def guess_again(self):
+        same = [cue.line for cue in self.cues] == [line for group in lyrics.sections(self._words) for line in group]
+        words = self._words if same else "\n".join(cue.line for cue in self.cues)
+        lines, self.seconds = await asyncio.to_thread(_guessed, self.film, words)
+        self.cues, self.timed, self.tap = _cues(lines), "guess", -1
+
+    @rx.event
+    def edit_lrc(self):
+        self.lrc = lyrics.to_lrc([lyrics.Line(cue.at, cue.line) for cue in self.cues])
+        self.lrc_open, self.tap = True, -1
+
+    @rx.event
+    def set_lrc(self, value: str):
+        self.lrc = value
+
+    @rx.event
+    def close_lrc(self):
+        self.lrc_open = False
+
+    @rx.event
+    async def apply_lrc(self):
+        """The lines as written: with times in front (LRC) they keep them, else they are guessed."""
+        if lyrics.has_times(self.lrc):
+            lines, self.timed = lyrics.from_lrc(self.lrc), "lrc"
+        else:
+            self._words = self.lrc
+            lines, self.seconds = await asyncio.to_thread(_guessed, self.film, self.lrc)
+            self.timed = "guess"
+        self.cues = _cues(lines)
+        self.show_lyrics = bool(lines)
+        self.lrc_open = False
+
+    # ---------------------------------------------- the video
+
+    @rx.event(background=True)
+    async def make_film(self):
+        async with self:
+            t = self.t
+            draft = self.film
+            if self.rendering or not draft:
+                return
+            if video.busy(draft):
+                self.film_error = t["film_busy"]
+                return
+            spec = video.Spec(
+                title=self.film_title.strip(),
+                artist=self.film_artist.strip(),
+                about=self.film_about.strip(),
+                look=self.look,
+                motion=self.motion,
+                lines=[lyrics.Line(cue.at, cue.line) for cue in self.cues],
+                lyrics=self.show_lyrics,
+            )
+            self.rendering, self.progress, self.film_error, self.tap = draft, 0, "", -1
+
+        async def heard(fraction: float) -> None:
+            async with self:
+                self.progress = int(fraction * 100)
+
+        try:
+            made = await video.render(draft, spec, heard)
+            async with self:
+                if self.film == draft:
+                    self.made = made
+                found = drafts.info(draft)
+                self.takes = [_row(found) if row.id == draft and found else row for row in self.takes]
+            yield rx.toast.success(t["film_made"])
+        except video.Stopped:
+            pass
+        except Exception as e:  # noqa: BLE001 - said on the page
+            logger.exception("Making a video failed")
+            async with self:
+                self.film_error = t["failed"] + str(e)
+        finally:
+            async with self:
+                self.rendering, self.progress = "", 0
+
+    @rx.event
+    def stop_film(self):
+        if self.rendering:
+            video.stop(self.rendering)

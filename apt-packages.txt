@@ -1,3 +1,5 @@
 # System packages required by this app (installed by the Agentic App Store smart-launcher).
-# ffmpeg writes MP3s and reads songs to change.
+# ffmpeg writes MP3s, reads songs to change and makes the music videos.
 ffmpeg
+# Chinese titles and lyrics in the music videos.
+fonts-noto-cjk

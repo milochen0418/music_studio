@@ -18,12 +18,25 @@ What the engine's songs are not: they don't loop without a seam (a game starts t
 
 A song someone else wrote stays theirs when changed: such takes are marked `rights: third-party` and shown as for your own use. Get permission before putting one in a public game or video.
 
+## Make Video: a take as a YouTube video
+
+Every take has a **Make Video** button. It makes a music video ready to upload to YouTube: an MP4 in 1080p (H.264 High + AAC, 30 frames a second, the index at the front), exactly as long as the song. It is made on this computer with FFmpeg, with no video model and no network; a 3-minute song takes about 1 to 2 minutes, and the page shows how far it is.
+
+- **Background:** the song's cover, blurred, drifting slowly (or still).
+- **Moves with the music:** spectrum bars or a waveform, in the cover's colour.
+- **The cover, the title, who made it and a small line** (style, tempo, key), all editable before it is made.
+- **Lyrics:** the line being sung, with the next one dimmed under it. The music engine gives lyrics without times, so the studio first guesses them from the song's length; then you can **tap along** (the song plays, and you press the space bar as each line begins), move every line or one line earlier or later, set a line to where the player is, or paste **LRC** (`[01:23.40]a line`) whose times are kept. While the song plays in the dialog, the line it has reached lights up, so you can check before making the video.
+
+The video plays in the dialog and downloads under its title. It is kept with the take (`video.mp4`, and what it was made with in `video.json`, so the dialog opens with the same settings and times); making it again replaces it.
+
 ## How it is built
 
 - `music_studio/producer.py`: what the model is told and how its answer is read. With no hub, or no answer, your words choose the style, so a piece always comes. `song_for` and `cover_for` write for the engine (`reflex_ddns_auth.ai.music`).
 - `music_studio/composer/`: `theory.py` (scales, chords), `styles.py` (how each style is played), `arrange.py` (writes the parts), `synth.py` (instruments as sums of sine waves, drums), `render.py` (plays and masters the score). The same brief and seed give the same samples.
 - `music_studio/remake.py`: tempo and key finding, and the changes.
 - `music_studio/drafts.py`, `library.py`: takes until they are kept, then `audio.file` items.
+- `music_studio/lyrics.py`: lyric lines without the section tags, LRC both ways, and the first guess at their times.
+- `music_studio/video.py`: the music video. Pillow draws the still pictures and the lyric lines (an FFmpeg built without libass or freetype, as Homebrew's, can't write text); numpy measures a row of levels a frame for the bars or the wave; FFmpeg moves, joins and encodes it all.
 
 ## Running it
 
@@ -35,11 +48,12 @@ DDNS_AI_HUB_URL=http://127.0.0.1:8172 DDNS_AUTH_SECRET=<the hub's secret> SERVIC
   poetry run reflex run --frontend-port 3175 --backend-port 8175
 ```
 
-It needs `ffmpeg`. On re-ddns, `apt-packages.txt` installs it.
+It needs `ffmpeg` (with `libx264`), and for Chinese titles and lyrics in videos a font that has Chinese in it (a Mac has one; on Debian, `fonts-noto-cjk`). On re-ddns, `apt-packages.txt` installs both.
 
 ## Tests
 
 ```bash
 poetry run pytest
 DDNS_COLLECTIONS_ROOT=/tmp/collections FRONTEND_PORT=3175 BACKEND_PORT=8175 poetry run ./run_test_suite.sh studio_flow
+DDNS_COLLECTIONS_ROOT=/tmp/collections FRONTEND_PORT=3175 BACKEND_PORT=8175 poetry run ./run_test_suite.sh video_flow
 ```

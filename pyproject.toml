@@ -14,6 +14,8 @@ reflex = "0.10.0"
 reflex-ddns-auth = {path = "../reflex_ddns_auth", develop = true}
 numpy = ">=2.0,<3"
 httpx = ">=0.28"
+# Text and still pictures in the music videos (FFmpeg does the moving parts).
+pillow = ">=11"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

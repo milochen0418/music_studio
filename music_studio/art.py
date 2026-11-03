@@ -41,19 +41,32 @@ def peaks(audio: np.ndarray, count: int) -> np.ndarray:
     return out / (out.max() or 1.0)
 
 
-def cover(audio: np.ndarray, style: str) -> bytes:
-    back, ink = (_rgb(c) for c in COLOURS.get(style, REMAKE))
-    y = np.linspace(0, 1, SIZE)[:, None]
-    x = np.linspace(0, 1, SIZE)[None, :]
+def cover(audio: np.ndarray, style: str, size: int = SIZE) -> bytes:
+    back, ink = (_rgb(c) for c in colours(style))
+    y = np.linspace(0, 1, size)[:, None]
+    x = np.linspace(0, 1, size)[None, :]
     glow = np.exp(-(((x - 0.5) ** 2 + (y - 0.5) ** 2) / 0.12))
     image = back + (ink - back)[None, None, :] * (glow * 0.28)[:, :, None]
     bars = peaks(audio, 48)
-    width = SIZE // 48
+    width = size // 48
+    gap = max(2, width // 3)
     for k, level in enumerate(bars):
-        half = int(level * SIZE * 0.34) + 1
-        left = k * width + (SIZE - 48 * width) // 2
-        image[SIZE // 2 - half : SIZE // 2 + half, left : left + max(1, width - 2)] = ink
+        half = int(level * size * 0.34) + 1
+        left = k * width + (size - 48 * width) // 2
+        image[size // 2 - half : size // 2 + half, left : left + max(1, width - gap)] = ink
     return _png(np.clip(image, 0, 255).astype(np.uint8))
+
+
+def colours(style: str) -> tuple[str, str]:
+    """A cover's background and ink: the style's, or the origin's (``sung``, ``cover``) for what
+    the engine made."""
+    return COLOURS.get(style, REMAKE)
+
+
+def cover_style(take: dict) -> str:
+    """What a take's cover was drawn for (see ``drafts._save``)."""
+    origin = take.get("origin") or ""
+    return take.get("style") or "" if origin == "composed" else origin
 
 
 def wave_path(audio: np.ndarray, count: int = 120) -> str:
