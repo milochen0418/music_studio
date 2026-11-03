@@ -333,7 +333,7 @@ def _film_preview() -> rx.Component:
                     rx.icon("clapperboard", size=16),
                     rx.cond(Video.film_version != "", T["remake_film"], T["make_film"]),
                     on_click=Video.make_film,
-                    disabled=Video.rendering != "",
+                    disabled=(Video.rendering != "") | (Video.listening == Video.film),
                     data_testid="video-make",
                     class_name=PRIMARY,
                 ),
@@ -380,7 +380,8 @@ def _film_settings() -> rx.Component:
 def _cue_row(cue: Cue, index) -> rx.Component:
     return rx.el.div(
         rx.el.button(rx.icon("play", size=11), cue.clock, on_click=Video.play_from(index), title=T["play_here"], data_testid="cue-play", class_name="inline-flex w-[5.5rem] shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 font-mono text-xs text-amber-200 hover:bg-slate-800"),
-        rx.el.span(cue.line, class_name="min-w-0 flex-1 truncate text-sm"),
+        rx.el.span(cue.line, class_name=rx.cond(cue.heard == 0, "min-w-0 flex-1 truncate text-sm text-slate-500 line-through decoration-slate-600", "min-w-0 flex-1 truncate text-sm")),
+        rx.cond(cue.heard == 0, rx.el.span(rx.icon("ear-off", size=12), T["not_heard"], title=T["not_heard_tip"], data_testid="cue-unheard", class_name="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-400/10 px-2 py-0.5 text-[11px] text-amber-200")),
         rx.el.button(rx.icon("minus", size=12), on_click=Video.nudge(index, -0.25), title="-0.25 s", data_testid="cue-earlier", class_name=SMALL),
         rx.el.button(rx.icon("plus", size=12), on_click=Video.nudge(index, 0.25), title="+0.25 s", data_testid="cue-later", class_name=SMALL),
         AtPlayer.create(rx.icon("timer", size=13), on_click=Video.stamp(index), title=T["stamp"], data_testid="cue-stamp", class_name=SMALL),
@@ -401,6 +402,19 @@ def _film_lyrics() -> rx.Component:
             rx.el.h3(rx.icon("captions", size=16, class_name="text-amber-400"), T["show_lyrics"], class_name="flex items-center gap-2 font-semibold"),
             rx.el.p(Video.timed_words, data_testid="timed", class_name="text-xs text-slate-400"),
             class_name="flex flex-wrap items-baseline gap-x-3 gap-y-1",
+        ),
+        rx.cond(
+            Video.listening == Video.film,
+            rx.el.div(
+                rx.el.span(rx.spinner(size="2"), Video.listen_note, data_testid="listen-stage", class_name="inline-flex items-center gap-2 text-sm text-slate-200"),
+                rx.el.button(rx.icon("square", size=13), T["stop"], on_click=Video.stop_listen, data_testid="listen-stop", class_name=GHOST),
+                class_name="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-sky-400/30 bg-sky-950/40 px-3 py-2",
+            ),
+            rx.el.div(
+                rx.el.button(rx.icon("ear", size=16), T["listen"], on_click=Video.listen_film, disabled=(Video.cues.length() == 0) | (Video.listening != ""), title=T["listen_tip"], data_testid="listen", class_name=f"{BUTTON} bg-sky-400 text-slate-950 hover:bg-sky-300 disabled:opacity-50"),
+                rx.cond(~Video.ears, rx.el.span(T["listen_first"], class_name="text-xs text-slate-400")),
+                class_name="mt-3 flex flex-wrap items-center gap-3",
+            ),
         ),
         rx.el.audio(id="mv-audio", src=BACKEND + "/_studio/take/" + Video.film + ".mp3", controls=True, preload="metadata", class_name="mt-3 h-9 w-full"),
         rx.el.p(rx.el.span(T["now_singing"], class_name="shrink-0 text-xs text-slate-500"), rx.el.span(id="mv-now", data_testid="now", class_name="min-w-0 truncate text-sm text-sky-200"), class_name="mt-2 flex min-h-6 items-baseline gap-2"),

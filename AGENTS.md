@@ -2,7 +2,7 @@
 
 Read `README.md` first. Python 3.11 through Poetry; `poetry run` for everything; E2E through `./run_test_suite.sh <suite>` with a scratch `DDNS_COLLECTIONS_ROOT`.
 
-- The app holds no model or key: the producer is the AI Hub's role `smart` through `reflex_ddns_auth.ai`. Thinking models need a large `max_tokens`, or they think it away and answer nothing.
+- The app holds no model or key: the producer is the AI Hub's role `smart` through `reflex_ddns_auth.ai`. Thinking models need a large `max_tokens`, or they think it away and answer nothing. The one exception is the speech model that times lyrics (`listen.py`, Whisper on the CPU, as English Chat's subtitles): a local signal model, no key, downloaded into the data folder (never the project folder, which hot-reloads).
 - The model writes a brief, never notes. A bad answer must fall back to the style's own choice, and no answer to `producer.guess`.
 - The composer is deterministic: nothing in `composer/` may use unseeded randomness, or the loop stops being exact. Everything after the notes looks only backwards in time for the same reason (`render._high_pass`).
 - A dataclass field named `length` clashes with `ObjectVar.length()` in `rx.foreach`: rows use `clock`.
@@ -11,3 +11,4 @@ Read `README.md` first. Python 3.11 through Poetry; `poetry run` for everything;
 - Check sound by numbers (`tests/test_composer.py`): nobody here can hear it, so say so when reporting.
 - Make Video (`video.py`): text is drawn with Pillow, never FFmpeg's `drawtext` or `subtitles` (Homebrew's FFmpeg has neither). The command must run on Debian's FFmpeg 5.1 in the container as well as on the Mac's; no filter options newer than 5.1. Every input must end by itself (`-t` on a looped picture, `d=` on a lavfi source): with an endless input, 5.1 writes the whole video and then runs for ever, while the Mac's FFmpeg stops. Extract frames and look at them after changing the pictures. The video's length must stay the song's (`tests/test_video.py` checks it).
 - `pillow` and `fonts-noto-cjk` reach a dev install of re-ddns only when its container restarts: restart it before writing code that imports them.
+- Lyric timing (`lyrics.align`): never give Whisper the lyrics as a prompt; on a part with no words it writes the prompt back as if heard. A line counts as heard only with enough of it matched, and lines not heard stay out of the video: the engine leaves lines out. Whisper "hears" subtitle credits in instrumental parts (`listen.PHANTOMS`). `tests/test_listen.py` and the `listen_flow` suite need `MUSIC_STUDIO_WHISPER` set to a model folder (and macOS `say`); without it they skip.

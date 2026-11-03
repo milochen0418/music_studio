@@ -17,7 +17,7 @@ import reflex as rx
 from reflex_ddns_auth import ai
 from reflex_ddns_auth.intent import IntentPage, intent_update
 
-from music_studio import drafts, library, lyrics, producer, remake, video
+from music_studio import drafts, library, listen, lyrics, producer, remake, video
 from music_studio.i18n import SCENES, STYLE_NAMES, TEXT
 
 logger = logging.getLogger(__name__)
@@ -476,15 +476,23 @@ class Cue:
     at: float
     clock: str
     line: str
+    end: float = 0.0  # when its singing ends, if the AI heard it
+    heard: int = -1  # 1 the AI heard it sung, 0 it didn't (left out of the video), -1 nobody listened or a person timed it
 
 
 def _cues(lines: list[lyrics.Line]) -> list[Cue]:
-    return [Cue(round(line.at, 2), lyrics.clock(line.at), line.text) for line in lines]
+    return [Cue(round(line.at, 2), lyrics.clock(line.at), line.text, line.end, -1 if line.heard is None else int(line.heard)) for line in lines]
 
 
-def _at(cue: Cue, at: float, seconds: float) -> Cue:
+def _line(cue: Cue) -> lyrics.Line:
+    return lyrics.Line(cue.at, cue.line, cue.end, None if cue.heard < 0 else bool(cue.heard))
+
+
+def _at(cue: Cue, at: float, seconds: float, by_hand: bool = True) -> Cue:
+    """The line moved to ``at``. Moved by hand, it is shown even if the AI didn't hear it."""
     at = round(min(max(0.0, at), seconds or at), 2)
-    return Cue(at, lyrics.clock(at), cue.line)
+    end = round(cue.end + at - cue.at, 2) if cue.end > 0 else 0.0
+    return Cue(at, lyrics.clock(at), cue.line, end, -1 if by_hand else cue.heard)
 
 
 def _about(take: dict[str, Any], lang: str) -> str:
@@ -508,6 +516,11 @@ def _guessed(draft: str, words: str) -> tuple[list[lyrics.Line], float]:
     return lyrics.guess(words, seconds, level, step / rate), seconds
 
 
+def _matched(texts: list[str], found: dict[str, Any]) -> list[lyrics.Line]:
+    """The lines put where the AI heard them sung."""
+    return lyrics.align(texts, [(float(w[0]), float(w[1]), str(w[2])) for w in found.get("words") or []], float(found.get("seconds") or 0))
+
+
 class Video(Studio):
     """Make Video: a take as a 1080p MP4 for YouTube, with its lyrics timed by ear."""
 
@@ -529,7 +542,11 @@ class Video(Studio):
     progress: int = 0
     film_error: str = ""
     made: dict[str, Any] = {}  # what the open take's video was made with
+    listening: str = ""  # the take the AI is listening to
+    listen_note: str = ""
+    ears: bool = False  # the speech model is here: listening needs no download
     _words: str = ""  # the take's lyrics as they came, tags and all
+    _language: str = ""
 
     @rx.var
     def film_version(self) -> str:
@@ -554,7 +571,10 @@ class Video(Studio):
 
     @rx.var
     def timed_words(self) -> str:
-        return self.t.get(f"timed_{self.timed}", "") if self.cues else self.t["no_lyrics"]
+        if not self.cues:
+            return self.t["no_lyrics"]
+        heard = sum(1 for cue in self.cues if cue.heard == 1)
+        return _fill(self.t.get(f"timed_{self.timed}", ""), n=heard, all=len(self.cues))
 
     @rx.event
     async def open_film(self, draft: str):
@@ -572,11 +592,19 @@ class Video(Studio):
             self.film_about = str(saved.get("about") if "about" in saved else _about(take, self.lang))
             self.look = saved.get("look") if saved.get("look") in video.LOOKS else "bars"
             self.motion = bool(saved.get("motion", True))
+            self._language = listen.language_of(take, self._words)
+            self.ears = await asyncio.to_thread(listen.present)
+            found = None if saved.get("lines") else await asyncio.to_thread(listen.heard, draft)
+            self.timed = "saved" if saved.get("lines") else "guess"
             if saved.get("lines"):
-                lines = [lyrics.Line(float(at), str(text)) for at, text in saved["lines"]]
+                lines = [lyrics.Line(float(row[0]), str(row[1]), *(float(row[2]), row[3]) if len(row) > 3 else ()) for row in saved["lines"]]
+            elif found and lines:
+                lines, self.timed = _matched([line.text for line in lines], found), "heard"
             self.cues = _cues(lines)
             self.show_lyrics = bool(saved.get("lyrics", True)) and bool(lines)
-            self.timed = "saved" if saved.get("lines") else "guess"
+            if self.timed == "guess" and lines and self.ears and not self.listening:
+                self.film_open = True
+                return Video.listen_film  # the model is here: the AI times the lines at once
         self.film_open = True
         return None
 
@@ -618,7 +646,7 @@ class Video(Studio):
 
     @rx.event
     def shift(self, delta: float):
-        self.cues = [_at(cue, cue.at + delta, self.seconds) for cue in self.cues]
+        self.cues = [_at(cue, cue.at + delta, self.seconds, by_hand=False) for cue in self.cues]
         self.timed = "hand"
 
     @rx.event
@@ -677,7 +705,7 @@ class Video(Studio):
 
     @rx.event
     def edit_lrc(self):
-        self.lrc = lyrics.to_lrc([lyrics.Line(cue.at, cue.line) for cue in self.cues])
+        self.lrc = lyrics.to_lrc([_line(cue) for cue in self.cues])
         self.lrc_open, self.tap = True, -1
 
     @rx.event
@@ -690,16 +718,63 @@ class Video(Studio):
 
     @rx.event
     async def apply_lrc(self):
-        """The lines as written: with times in front (LRC) they keep them, else they are guessed."""
+        """The lines as written: with times in front (LRC) they keep them; else they go where the AI
+        heard them, if it listened, or are guessed."""
+        found = None
         if lyrics.has_times(self.lrc):
             lines, self.timed = lyrics.from_lrc(self.lrc), "lrc"
         else:
             self._words = self.lrc
             lines, self.seconds = await asyncio.to_thread(_guessed, self.film, self.lrc)
+            found = await asyncio.to_thread(listen.heard, self.film)
             self.timed = "guess"
+        if found and lines:
+            lines, self.timed = _matched([line.text for line in lines], found), "heard"
         self.cues = _cues(lines)
         self.show_lyrics = bool(lines)
         self.lrc_open = False
+
+    # ---------------------------------------------- the AI listens
+
+    @rx.event(background=True)
+    async def listen_film(self):
+        """The AI hears what is sung and when, and each line goes where it was heard."""
+        async with self:
+            t = self.t
+            draft, language = self.film, self._language
+            texts = [cue.line for cue in self.cues]
+            if self.listening or not draft or not texts:
+                return
+            self.listening, self.listen_note, self.film_error, self.tap = draft, t["listen_wait"], "", -1
+
+        async def heard(job: listen.Progress) -> None:
+            async with self:
+                self.listen_note = _fill(t[f"listen_{job.phase}"], p=int(job.done * 100), mb=job.note)
+
+        try:
+            found = await listen.hear(draft, language, heard)
+            lines = await asyncio.to_thread(_matched, texts, found)
+            async with self:
+                self.ears = True
+                if self.film == draft and [cue.line for cue in self.cues] == texts:
+                    if any(line.heard for line in lines):
+                        self.cues, self.timed = _cues(lines), "heard"
+                    else:
+                        self.film_error = t["listen_none"]
+        except listen.Stopped:
+            pass
+        except Exception as e:  # noqa: BLE001 - said on the page
+            logger.exception("Listening failed")
+            async with self:
+                self.film_error = t["failed"] + str(e)
+        finally:
+            async with self:
+                self.listening, self.listen_note = "", ""
+
+    @rx.event
+    def stop_listen(self):
+        if self.listening:
+            listen.stop(self.listening)
 
     # ---------------------------------------------- the video
 
@@ -719,7 +794,7 @@ class Video(Studio):
                 about=self.film_about.strip(),
                 look=self.look,
                 motion=self.motion,
-                lines=[lyrics.Line(cue.at, cue.line) for cue in self.cues],
+                lines=[_line(cue) for cue in self.cues],
                 lyrics=self.show_lyrics,
             )
             self.rendering, self.progress, self.film_error, self.tap = draft, 0, "", -1

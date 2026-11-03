@@ -134,7 +134,7 @@ def test_a_video_as_long_as_the_song_with_each_line_at_its_time(take):
     lit = lambda at: float((_frame(path, at)[strip] > 200).mean())  # noqa: E731
     assert lit(2.5) > lit(0.7) + 0.01, "the first line is up while it is sung"
     kept = video.settings(take["id"])
-    assert kept["title"] == "影片測試" and kept["lines"] == [[1.5, "第一句"], [3.5, "second line"]]
+    assert kept["title"] == "影片測試" and kept["lines"] == [[1.5, "第一句", 0.0, None], [3.5, "second line", 0.0, None]]
 
 
 def test_stopped_leaves_nothing(take):
@@ -168,3 +168,8 @@ def test_the_video_is_served_a_range_at_a_time_and_downloads_under_its_title(tak
         assert whole.status_code == 200 and whole.headers["content-disposition"] == "attachment; filename*=utf-8''%E5%A4%9C%20%E8%A1%8C%20MV.mp4"
         assert client.get("/_studio/video/nothing-here.mp4").status_code == 404
         assert client.get("/_studio/video/..%2F..%2Fetc.mp4").status_code == 404
+
+
+def test_lines_the_ai_did_not_hear_stay_out_of_the_video():
+    spec = video.Spec(title="t", artist="a", lines=[Line(1, "sung", 2, True), Line(3, "left out", heard=False), Line(5, "timed by hand")])
+    assert [line.text for line in spec.sung] == ["sung", "timed by hand"]

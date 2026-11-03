@@ -173,7 +173,7 @@ assert abs(float(info["format"]["duration"]) - song) < 0.1, (info["format"]["dur
 head = made.read_bytes()[:4 << 20]
 assert 0 <= head.find(b"moov") < head.find(b"mdat"), "the index comes first (fast start)"
 kept = json.loads((folder / "video.json").read_text())
-assert kept["title"] == "夜行 MV" and kept["look"] == "wave" and [at for at, _ in kept["lines"]] == [2.0, 6.5, 11.0, 15.2]
+assert kept["title"] == "夜行 MV" and kept["look"] == "wave" and [row[0] for row in kept["lines"]] == [2.0, 6.5, 11.0, 15.2]
 # The first line is sung from 2.0 s: its words are in the strip at 3 s and not at 1 s.
 strip = slice(860, 945)
 before, during = frame(made, 1.0, "05_frame_1s"), frame(made, 3.0, "06_frame_3s")

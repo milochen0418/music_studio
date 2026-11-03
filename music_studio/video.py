@@ -69,8 +69,8 @@ class Spec:
 
     @property
     def sung(self) -> list[Line]:
-        """The lines the video shows."""
-        return [line for line in self.lines if line.text] if self.lyrics else []
+        """The lines the video shows: not those the AI listened for and didn't hear sung."""
+        return [line for line in self.lines if line.text and line.heard is not False] if self.lyrics else []
 
 
 # ------------------------------------------------------------------ what moves with the music
@@ -533,7 +533,7 @@ async def render(draft: str, spec: Spec, progress: Callable[[float], Awaitable[N
             "look": spec.look,
             "motion": spec.motion,
             "lyrics": spec.lyrics,
-            "lines": [[line.at, line.text] for line in spec.lines],
+            "lines": [[line.at, line.text, line.end, line.heard] for line in spec.lines],
             "seconds": round(seconds, 2),
             "bytes": part.stat().st_size,
             "made": int(time.time()),

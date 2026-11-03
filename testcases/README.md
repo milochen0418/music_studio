@@ -8,4 +8,5 @@ scratch folder: the suite publishes into it.
 |-------|----------------|
 | `studio_flow` | Say what a piece is for, get two takes that play, keep one, find it in the collection with its loop points, then change it into a new take. |
 | `video_flow` | Make Video on a take with lyrics but no times: the lines guessed, tapped along to, nudged and given as LRC; a 1080p MP4 (H.264 High + AAC) as long as the song, playing in the dialog, downloading under its title, the first line on screen when it is sung; another video started and stopped. About a minute. |
+| `listen_flow` | (Needs `MUSIC_STUDIO_WHISPER` set to a model folder, and macOS `say`; skipped without.) Lines said at known times over music and one never said: on opening Make Video the AI listens by itself, each line lands within a second of where it is said, the line never said is marked and left out, and the video shows each line while it is said. |
 | `sing_flow` | (Needs an AI Hub with the music engine; skipped without one.) A song sung by the AI from a few words, its lyrics shown, and a whole remake of a library song with an instrument in place of the singing. Several minutes. |

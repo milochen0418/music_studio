@@ -25,9 +25,13 @@ Every take has a **Make Video** button. It makes a music video ready to upload t
 - **Background:** the song's cover, blurred, drifting slowly (or still).
 - **Moves with the music:** spectrum bars or a waveform, in the cover's colour.
 - **The cover, the title, who made it and a small line** (style, tempo, key), all editable before it is made.
-- **Lyrics:** the line being sung, with the next one dimmed under it. The music engine gives lyrics without times, so the studio first guesses them from the song's length; then you can **tap along** (the song plays, and you press the space bar as each line begins), move every line or one line earlier or later, set a line to where the player is, or paste **LRC** (`[01:23.40]a line`) whose times are kept. While the song plays in the dialog, the line it has reached lights up, so you can check before making the video.
+- **Lyrics:** the line being sung, with the next one dimmed under it, each when it is sung.
 
-The video plays in the dialog and downloads under its title. It is kept with the take (`video.mp4`, and what it was made with in `video.json`, so the dialog opens with the same settings and times); making it again replaces it.
+The music engine gives lyrics without times, and doesn't always sing every line, or start with the first. So **the AI listens to the song**: Whisper hears what is sung and when, and the studio matches what it heard with the lyrics, sound by sound and in order (Chinese by its pinyin, so simplified or homophone characters heard still match). Each line goes where its words were heard; a line the AI didn't hear is marked *not heard* and left out of the video, so no line shows while something else is sung. It starts by itself when the dialog opens, once the speech model is here; the first time, the **AI listens** button downloads it (about 1.6 GB, once). On this Mac a 3-minute song takes about 40 seconds. A line shows a fraction of a second before it is sung, as subtitles do.
+
+You can still change any time by hand: **tap along** (the song plays, and you press the space bar as each line begins), move every line or one line earlier or later, set a line to where the player is (which also puts a line the AI didn't hear back in), or paste **LRC** (`[01:23.40]a line`) whose times are kept; lyrics pasted without times are matched with what the AI heard. While the song plays in the dialog, the line it has reached lights up.
+
+The video plays in the dialog and downloads under its title. It is kept with the take (`video.mp4`, and what it was made with in `video.json`, so the dialog opens with the same settings and times; what the AI heard in `heard.json`); making it again replaces it.
 
 ## How it is built
 
@@ -35,7 +39,8 @@ The video plays in the dialog and downloads under its title. It is kept with the
 - `music_studio/composer/`: `theory.py` (scales, chords), `styles.py` (how each style is played), `arrange.py` (writes the parts), `synth.py` (instruments as sums of sine waves, drums), `render.py` (plays and masters the score). The same brief and seed give the same samples.
 - `music_studio/remake.py`: tempo and key finding, and the changes.
 - `music_studio/drafts.py`, `library.py`: takes until they are kept, then `audio.file` items.
-- `music_studio/lyrics.py`: lyric lines without the section tags, LRC both ways, and the first guess at their times.
+- `music_studio/lyrics.py`: lyric lines without the section tags, LRC both ways, matching what was heard with the lyrics (`align`), and a first guess at the times when nobody listened.
+- `music_studio/listen.py`: Whisper ([faster-whisper](https://github.com/SYSTRAN/faster-whisper), int8 on the CPU, in this app as English Chat's subtitles are): the model's download (into the data folder), the listening, `heard.json`. `MUSIC_STUDIO_WHISPER` picks another model (`medium`, `small`, a Hugging Face repo or a folder); `MUSIC_STUDIO_WHISPER_THREADS` the CPU threads (8).
 - `music_studio/video.py`: the music video. Pillow draws the still pictures and the lyric lines (an FFmpeg built without libass or freetype, as Homebrew's, can't write text); numpy measures a row of levels a frame for the bars or the wave; FFmpeg moves, joins and encodes it all.
 
 ## Running it
@@ -56,4 +61,7 @@ It needs `ffmpeg` (with `libx264`), and for Chinese titles and lyrics in videos 
 poetry run pytest
 DDNS_COLLECTIONS_ROOT=/tmp/collections FRONTEND_PORT=3175 BACKEND_PORT=8175 poetry run ./run_test_suite.sh studio_flow
 DDNS_COLLECTIONS_ROOT=/tmp/collections FRONTEND_PORT=3175 BACKEND_PORT=8175 poetry run ./run_test_suite.sh video_flow
+# With the speech model (a folder holding it; the app's data folder has one under models/ after its first download):
+MUSIC_STUDIO_WHISPER=<model folder> poetry run pytest tests/test_listen.py
+MUSIC_STUDIO_WHISPER=<model folder> DDNS_COLLECTIONS_ROOT=/tmp/collections FRONTEND_PORT=3175 BACKEND_PORT=8175 poetry run ./run_test_suite.sh listen_flow
 ```

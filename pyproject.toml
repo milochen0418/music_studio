@@ -16,6 +16,9 @@ numpy = ">=2.0,<3"
 httpx = ">=0.28"
 # Text and still pictures in the music videos (FFmpeg does the moving parts).
 pillow = ">=11"
+# The AI listens to a song to time its lyrics: Whisper on the CPU, and Chinese matched by its sound.
+faster-whisper = ">=1.1"
+pypinyin = ">=0.53"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
