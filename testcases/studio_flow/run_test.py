@@ -1,5 +1,6 @@
 """The studio from a person's side: say what a piece is for, get two takes that really play, keep one,
-and find it in the shared library with its loop points; then change that piece into a new take."""
+and find it in the shared library with its loop points and how it was made; read that record (who
+decided, what went to the composer) and copy it; then change that piece into a new take."""
 
 import json
 import os
@@ -54,6 +55,24 @@ with sync_playwright() as pw:
     meta = json.loads(manifests[0].read_text())["meta"]
     log("kept:", {k: meta[k] for k in ("origin", "rights", "style", "bpm", "loop_start", "loop_end", "duration")})
     assert meta["rights"] == "own" and 0 < meta["loop_start"] < meta["loop_end"] < meta["duration"]
+    kept_record = json.loads((manifests[0].parent.parent / "making.json").read_text())
+    assert kept_record["to"] == "composer" and kept_record["words"] == "夜間霓虹賽道的最後一圈", "the kept piece carries how it was made"
+
+    # How the kept take was made: who decided, and what the composer was given.
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    page.locator("[data-testid=take]").first.locator("[data-testid=making]").click()
+    page.wait_for_selector("[data-testid=making-dialog]")
+    record = page.inner_text("[data-testid=making-dialog]")
+    log("record:", record.replace("\n", " | ")[:400])
+    assert "誰做的" in record and "交給作曲程式的內容" in record and "seed:" in record and "style:" in record
+    assert "AI 製作人收到的訊息" in record or "沒有可用的回答" in record, "the producer's words, or why there are none"
+    page.click("[data-testid=making-copy]")
+    wait_for(lambda: "## 誰做的" in page.evaluate("navigator.clipboard.readText()"), "the record copied")
+    copied = page.evaluate("navigator.clipboard.readText()")
+    assert copied.startswith("# ") and "## 交給作曲程式的內容" in copied, copied[:200]
+    shot(page, "02_record")
+    page.click("[data-testid=making-close]")
+    wait_for(lambda: page.locator("[data-testid=making-dialog]").count() == 0, "the record closes")
 
     page.click("[data-testid=tab-remake]")
     page.wait_for_selector("[data-testid=source]", timeout=15000)
@@ -68,11 +87,16 @@ with sync_playwright() as pw:
     wait_for(lambda: page.locator("[data-testid=take]").count() > before, "the take as it was", 120)
     assert page.locator("[data-testid=error]").count() == 0
     assert "聲音不變" in page.locator("[data-testid=take]").first.inner_text(), "says nothing was changed"
+    page.locator("[data-testid=take]").first.locator("[data-testid=making]").click()
+    page.wait_for_selector("[data-testid=making-dialog]")
+    record = page.inner_text("[data-testid=making-dialog]")
+    assert "沒有問 AI 製作人" in record and "交給改編程式的內容" in record, record[:300]
+    page.click("[data-testid=making-close]")
     page.fill("[data-testid=how]", "改成賽車用的，更快更有衝勁")
     before = page.locator("[data-testid=take]").count()
     page.click("[data-testid=change]")
     wait_for(lambda: page.locator("[data-testid=take]").count() > before, "the changed take", 120)
-    shot(page, "02_changed")
+    shot(page, "03_changed")
     browser.close()
 log("output:", OUTPUT_DIR)
 finish(errors)

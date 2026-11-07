@@ -17,7 +17,7 @@ import reflex as rx
 from reflex_ddns_auth import ai
 from reflex_ddns_auth.intent import IntentPage, intent_update
 
-from music_studio import drafts, library, listen, lyrics, producer, remake, video
+from music_studio import drafts, library, listen, lyrics, making, producer, remake, video
 from music_studio.i18n import SCENES, STYLE_NAMES, TEXT
 
 logger = logging.getLogger(__name__)
@@ -295,11 +295,14 @@ class Studio(rx.State):
                 async for _ in self._sing(words, lang, lyrics_lang, seconds):
                     pass
                 return
-            brief, model, why = await producer.brief_for(words, lang, bars, style if style != "auto" else "")
+            talk = producer.Talk()
+            brief, model, why = await producer.brief_for(words, lang, bars, style if style != "auto" else "", talk=talk)
             async with self:
                 self.stage = t["stage_writing"]
             for _ in range(TAKES):
-                made = await asyncio.to_thread(drafts.take_composed, brief, secrets.randbelow(1 << 30), words, model, why)
+                seed = secrets.randbelow(1 << 30)
+                record = making.record("composed", words, talk, "composer", {**dataclasses.asdict(brief), "seed": seed})
+                made = await asyncio.to_thread(drafts.take_composed, brief, seed, words, model, why, record)
                 async with self:
                     self.takes = [_row(made), *self.takes]
                 yield intent_update({"event": "take", "title": made["title"]})
@@ -324,10 +327,12 @@ class Studio(rx.State):
         t = self.t
         async with self:
             self.stage = t["stage_writing_song"]
-        spec, title, model, why = await producer.song_for(words, lang, lyrics_lang, False, seconds)
+        talk = producer.Talk()
+        spec, title, model, why = await producer.song_for(words, lang, lyrics_lang, False, seconds, talk=talk)
         song = ai.music(spec)
         mp3 = await self._follow(song, t)
         sung = spec["lyrics"] != "[Instrumental]"
+        record = making.record("sung" if sung else "composed", words, talk, "engine", dict(spec), engine=making.engine_said(song))
         made = await asyncio.to_thread(
             drafts.take_engine,
             mp3,
@@ -346,6 +351,7 @@ class Studio(rx.State):
                 "language": spec["language"],
                 "engine": song.models,
             },
+            record,
         )
         async with self:
             self.takes = [_row(made), *self.takes]
@@ -359,6 +365,7 @@ class Studio(rx.State):
         found = await asyncio.to_thread(remake.analyse, path)
         heard: list[tuple[float, float, str]] = []
         language = ""
+        listening: dict[str, Any] | None = None
         if vocals == "keep":
             # The engine can't keep a singer: it sings what it is given, so it is given the words.
 
@@ -370,9 +377,11 @@ class Studio(rx.State):
                 self.stage = t["hear_wait"]
             said = await listen.hear_recording(path, source.get("language") or "", told)
             heard, language = listen.sung(said), str(said.get("language") or "")
+            listening = {"model": said.get("model") or "", "language": language, "lines": len(heard)}
         async with self:
             self.stage = t["stage_planning"]
-        spec, new_title, model, why = await producer.cover_for(how, found.facts(), _clean_title(title), vocals, heard=heard, lang=lang)
+        talk = producer.Talk()
+        spec, new_title, model, why = await producer.cover_for(how, found.facts(), _clean_title(title), vocals, heard=heard, lang=lang, talk=talk)
         if vocals == "keep" and not heard:
             why = f"{t['no_singing_heard']} {why}".strip()
         spec["audio_b64"] = base64.b64encode(await asyncio.to_thread(path.read_bytes)).decode()
@@ -380,6 +389,9 @@ class Studio(rx.State):
         spec["language"] = (producer.engine_language(language) if heard else "") or ("zh" if lang == "zh" else "en")
         song = ai.music(spec)
         mp3 = await self._follow(song, t)
+        request = {k: v for k, v in spec.items() if k != "audio_b64"}
+        request["source"] = {"title": source.get("title") or title, "bytes": path.stat().st_size}
+        record = making.record("cover", how, talk, "engine", request, engine=making.engine_said(song), listening=listening)
         made = await asyncio.to_thread(
             drafts.take_engine,
             mp3,
@@ -401,6 +413,7 @@ class Studio(rx.State):
                 "language": spec["language"],
                 "engine": song.models,
             },
+            record,
         )
         async with self:
             self.takes = [_row(made), *self.takes]
@@ -433,13 +446,16 @@ class Studio(rx.State):
                 await self._cover(path, source, title, how, vocals, t, lang)
                 return
             found = await asyncio.to_thread(remake.analyse, path)
+            talk: producer.Talk | None = None
             if how:
-                plan, model, why = await producer.plan_for(how, found.facts(), _clean_title(title))
+                talk = producer.Talk()
+                plan, model, why = await producer.plan_for(how, found.facts(), _clean_title(title), talk=talk)
             else:  # nothing asked for: the strongest stretch as a loop, as it sounds
                 plan, model, why = remake.Plan(title=_clean_title(title), room=0.0), "", t["tweak_as_is"]
             async with self:
                 self.stage = t["stage_changing"]
-            made = await asyncio.to_thread(drafts.take_remade, path, plan, bars, found, source, how, model, why)
+            record = making.record("remake", how, talk, "remaker", {**dataclasses.asdict(plan), "bars": bars, "source": source.get("title") or title})
+            made = await asyncio.to_thread(drafts.take_remade, path, plan, bars, found, source, how, model, why, record)
             async with self:
                 self.takes = [_row(made), *self.takes]
         except Exception as e:  # noqa: BLE001 - said on the page
@@ -481,6 +497,45 @@ def _clean_meta(value: Any) -> str:
 
 def _clean_title(title: str) -> str:
     return re.sub(r"\.(mp3|wav|m4a|flac|ogg)$", "", title or "", flags=re.IGNORECASE)
+
+
+# ------------------------------------------------------------------ How a take was made
+
+
+class Making(Studio):
+    """A take's making record: who decided with which model, what the producer was told and
+    answered, and what went to the music engine."""
+
+    record_open: bool = False
+    record_title: str = ""
+    record: dict[str, Any] = {}
+
+    @rx.var
+    def record_parts(self) -> list[making.Part]:
+        return making.parts(self.record, self.t)
+
+    @rx.var
+    def record_old(self) -> bool:
+        return bool(self.record.get("old"))
+
+    @rx.event
+    def open_record(self, draft: str):
+        take = drafts.info(draft)
+        if take is None:
+            return rx.toast.error(self.t["gone"])
+        self.record = making.of_take(take, drafts.making(draft))
+        self.record_title = str(take.get("title") or "")
+        self.record_open = True
+        return None
+
+    @rx.event
+    def close_record(self):
+        self.record_open = False
+
+    @rx.event
+    def copy_record(self):
+        old = self.t["mk_old"] if self.record.get("old") else ""
+        return [rx.set_clipboard(making.as_text(self.record_title, making.parts(self.record, self.t), old)), rx.toast.success(self.t["mk_copied"])]
 
 
 # ------------------------------------------------------------------ Make Video

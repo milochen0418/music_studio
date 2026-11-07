@@ -14,6 +14,9 @@ the usual ``duration`` and ``format``:
   the engine's words) and ``language`` of the singing.
 
 The item's ``source`` is the studio's page. A remake says what it came from with ``derived_from``.
+Beside ``piece.mp3`` a take made here carries ``making.json``: how it was made, word for word (who
+decided with which model, what the producer was told and answered, what went to the music engine;
+see :mod:`music_studio.making`).
 """
 
 from __future__ import annotations
@@ -94,12 +97,17 @@ def _item_id(title: str) -> str:
     return f"{slug or 'piece'}-{secrets.token_hex(3)}"
 
 
-def publish_piece(item_id: str, title: str, audio_file: Path, cover: Path | None, meta: dict[str, Any], derived: Iterable[str] = ()) -> str:
-    """A finished piece into the library, signed by this studio; its ref."""
+def publish_piece(
+    item_id: str, title: str, audio_file: Path, cover: Path | None, meta: dict[str, Any], derived: Iterable[str] = (), making: Path | None = None
+) -> str:
+    """A finished piece into the library, signed by this studio, with how it was made when that
+    was kept; its ref."""
     collection = audio()
     signed = {**meta, "artist": MAKER}
     with collection.publish(item_id, kind=KIND, title=title, meta=signed, source=f"{app_url(APP_ID)}/", derived_from=derived, primary="piece.mp3") as item:
         item.add_file(audio_file, "piece.mp3")
+        if making is not None:
+            item.add_file(making, drafts.MAKING)
         if cover is not None:
             item.set_thumbnail(cover)
     return collection.ref(item_id)
@@ -117,4 +125,4 @@ def keep(take: dict[str, Any]) -> str:
     }
     title = take.get("title") or "New piece"
     derived = [take["from_ref"]] if take.get("from_ref") else []
-    return publish_piece(_item_id(title), title, path, drafts.cover_path(take["id"]), meta, derived)
+    return publish_piece(_item_id(title), title, path, drafts.cover_path(take["id"]), meta, derived, drafts.making_path(take["id"]))

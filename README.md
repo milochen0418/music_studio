@@ -27,6 +27,19 @@ What the engine's songs are not: they don't loop without a seam (a game starts t
 
 A song someone else wrote stays theirs when changed: such takes are marked `rights: third-party` and shown as for your own use. Get permission before putting one in a public game or video.
 
+## How it was made: each take's record
+
+Every take has a **How it was made** button (製作紀錄), so you can look back at how each piece came about and learn what works. It shows:
+
+- who made it: the AI Hub's role (`smart`) and the model that answered, as the hub names it (with the owner's Claude Code, the model it runs, e.g. "Claude Code (your computer, claude-opus-5-5)"; see the hub's README), and how long it took; for a remake that sings the recording's words again, the speech model that heard them and how many lines; the music engine's models (ACE-Step's DiT and planner) and how long it worked, or the studio's own composer or remaker, which use no model;
+- what you wrote;
+- the producer's rules (the same each time, folded) and the message it got, word for word (for a remake: the recording's tempo and key, what you asked for, the lines heard in it);
+- its whole answer, as written;
+- what went to the music engine (the caption, lyrics, language, length, tempo, cover strength; not the recording itself), or the brief and seed the composer played, or the remaker's plan;
+- what the engine said when it was done (its tempo, key, length).
+
+**Copy all** copies it as text for your own notes. It is kept with the take (`making.json`), and a kept take carries it into its library item beside `piece.mp3`, so it stays when the take leaves the studio's newest 24. Takes made before records were kept show what they still have.
+
 ## Make Video: a take as a YouTube video
 
 Every take has a **Make Video** button. It makes a music video ready to upload to YouTube: an MP4 in 1080p (H.264 High + AAC, 30 frames a second, the index at the front), exactly as long as the song. It is made on this computer with FFmpeg, with no video model and no network; a 3-minute song takes about 1 to 2 minutes, and the page shows how far it is.
@@ -48,6 +61,7 @@ The video plays in the dialog and downloads under its title. It is kept with the
 - `music_studio/composer/`: `theory.py` (scales, chords), `styles.py` (how each style is played), `arrange.py` (writes the parts), `synth.py` (instruments as sums of sine waves, drums), `render.py` (plays and masters the score). The same brief and seed give the same samples.
 - `music_studio/remake.py`: tempo and key finding, and the changes.
 - `music_studio/drafts.py`, `library.py`: takes until they are kept, then `audio.file` items.
+- `music_studio/making.py`: each take's making record (`making.json`): what it holds, and how the page shows it.
 - `music_studio/lyrics.py`: lyric lines without the section tags, LRC both ways, matching what was heard with the lyrics (`align`), and a first guess at the times when nobody listened.
 - `music_studio/listen.py`: Whisper ([faster-whisper](https://github.com/SYSTRAN/faster-whisper), int8 on the CPU, in this app as English Chat's subtitles are): the model's download (into the data folder), the listening, `heard.json`; for a remake, the recording's words (`hear_recording`) and whether anybody sings in it at all (`sung`). `MUSIC_STUDIO_WHISPER` picks another model (`medium`, `small`, a Hugging Face repo or a folder); `MUSIC_STUDIO_WHISPER_THREADS` the CPU threads (8).
 - `music_studio/video.py`: the music video. Pillow draws the still pictures and the lyric lines (an FFmpeg built without libass or freetype, as Homebrew's, can't write text); numpy measures a row of levels a frame for the bars or the wave; FFmpeg moves, joins and encodes it all.

@@ -10,13 +10,18 @@ the song instead: a caption in the engine's words, the lyrics in the language as
 a remake the new version's caption and how far from the recording to go (``song_for``,
 ``cover_for``); the engine sings and plays it. The engine never keeps a recording's singer: to keep
 the singing, the words heard in the recording (``listen.hear_recording``) are sung again.
+
+Each of these takes a ``talk`` (:class:`Talk`) to fill with what the model was asked and answered,
+word for word, and who answered: the take keeps it in its making record (``drafts.making``).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from reflex_ddns_auth import ai
@@ -145,6 +150,42 @@ def read_json(text: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+@dataclasses.dataclass
+class Talk:
+    """One question to the producer and its answer, word for word, for the take's making record."""
+
+    role: str = ROLE
+    model: str = ""  # who answered, as the AI Hub names it ("" when nobody did)
+    system: str = ""  # the rules it was given
+    asked: str = ""  # the message
+    answer: str = ""  # its whole answer, as written
+    stop: str = ""  # end_turn, max_tokens or refusal
+    seconds: float = 0.0
+    problem: str = ""  # why there is no answer to use (no hub, no decision in it), when there is none
+
+
+async def _ask(system: str, asking: str, user: str, talk: Talk | None) -> tuple[dict[str, Any], str]:
+    """The producer's decision (``{}`` when it gave none) and who answered ("" then); ``talk``
+    keeps the exchange."""
+    talk = talk if talk is not None else Talk()
+    talk.system, talk.asked = system, asking
+    started = time.monotonic()
+    data: dict[str, Any] = {}
+    try:
+        reply = ai.stream(ROLE, system, [{"role": "user", "content": asking}], max_tokens=MAX_TOKENS, user=user)
+        text = "".join([piece async for piece in reply])
+        talk.model, talk.answer, talk.stop = reply.model, text, reply.stop
+        data = read_json(text)
+        if not data:
+            talk.problem = "no decision in the answer"
+            logger.warning("The producer gave no decision (stop: %s): %r", reply.stop, text[:200])
+    except ai.HubUnavailable as e:
+        talk.problem = str(e)
+        logger.info("No producer: %s", e)
+    talk.seconds = round(time.monotonic() - started, 1)
+    return data, talk.model if data else ""
+
+
 def _number(value: Any, low: float, high: float, fallback: float) -> float:
     try:
         return max(low, min(high, float(value)))
@@ -183,25 +224,15 @@ def brief_from(data: dict[str, Any], fallback: dict[str, Any], bars: int) -> Bri
     )
 
 
-async def brief_for(words: str, lang: str, bars: int, style: str = "", user: str = "") -> tuple[Brief, str, str]:
+async def brief_for(words: str, lang: str, bars: int, style: str = "", user: str = "", *, talk: Talk | None = None) -> tuple[Brief, str, str]:
     """What to compose: (brief, who decided, why). ``style`` forces a style when the person chose."""
     fallback = guess(words, lang)
     if style in STYLES:
         fallback = {**fallback, "style": style}
-    data: dict[str, Any] = {}
-    model = ""
-    try:
-        reply = ai.stream(ROLE, COMPOSE_SYSTEM, [{"role": "user", "content": _asking(words, style)}], max_tokens=MAX_TOKENS, user=user)
-        text = "".join([piece async for piece in reply])
-        model = reply.model
-        data = read_json(text)
-        if not data:
-            logger.warning("The producer gave no decision (stop: %s): %r", reply.stop, text[:200])
-    except ai.HubUnavailable as e:
-        logger.info("No producer: %s", e)
+    data, model = await _ask(COMPOSE_SYSTEM, _asking(words, style), user, talk)
     if style in STYLES:
         data["style"] = style
-    return brief_from(data, fallback, bars), model if data else "", str(data.get("why") or "")[:200]
+    return brief_from(data, fallback, bars), model, str(data.get("why") or "")[:200]
 
 
 def _asking(words: str, style: str) -> str:
@@ -234,21 +265,11 @@ def plan_from(data: dict[str, Any], fallback: Plan, title: str = "") -> Plan:
     )
 
 
-async def plan_for(words: str, facts: str, title: str, user: str = "") -> tuple[Plan, str, str]:
+async def plan_for(words: str, facts: str, title: str, user: str = "", *, talk: Talk | None = None) -> tuple[Plan, str, str]:
     """How to change a song: (plan, who decided, why)."""
     fallback = plan_guess(words)
-    data: dict[str, Any] = {}
-    model = ""
-    try:
-        reply = ai.stream(ROLE, REMAKE_SYSTEM, [{"role": "user", "content": f"The recording: {facts}\nWhat the person wants: {words}"}], max_tokens=MAX_TOKENS, user=user)
-        text = "".join([piece async for piece in reply])
-        model = reply.model
-        data = read_json(text)
-        if not data:
-            logger.warning("The producer gave no plan (stop: %s): %r", reply.stop, text[:200])
-    except ai.HubUnavailable as e:
-        logger.info("No producer: %s", e)
-    return plan_from(data, fallback, title), model if data else "", str(data.get("why") or "")[:200]
+    data, model = await _ask(REMAKE_SYSTEM, f"The recording: {facts}\nWhat the person wants: {words}", user, talk)
+    return plan_from(data, fallback, title), model, str(data.get("why") or "")[:200]
 
 
 # ------------------------------------------------------------ with the music engine
@@ -261,23 +282,15 @@ def _lyrics(text: Any, instrumental: bool) -> str:
     return words[:4000]
 
 
-async def song_for(words: str, lang: str, lyrics_lang: str, instrumental: bool, seconds: int, user: str = "") -> tuple[dict[str, Any], str, str, str]:
+async def song_for(
+    words: str, lang: str, lyrics_lang: str, instrumental: bool, seconds: int, user: str = "", *, talk: Talk | None = None
+) -> tuple[dict[str, Any], str, str, str]:
     """What to ask the engine for: (spec, title, who decided, why). Without a model the words
     become the caption as they are, and the piece has no singing (nobody wrote lyrics)."""
     fallback = guess(words, lang)
     want = lyrics_lang if lyrics_lang in LANGUAGES else ("zh" if lang == "zh" else "en")
-    data: dict[str, Any] = {}
-    model = ""
     asking = f"{words}\n(Lyrics in: {want}. Length: about {seconds} seconds.{' No singing: an instrumental piece.' if instrumental else ''})"
-    try:
-        reply = ai.stream(ROLE, SONG_SYSTEM, [{"role": "user", "content": asking}], max_tokens=MAX_TOKENS, user=user)
-        text = "".join([piece async for piece in reply])
-        model = reply.model
-        data = read_json(text)
-        if not data:
-            logger.warning("The songwriter gave no song (stop: %s): %r", reply.stop, text[:200])
-    except ai.HubUnavailable as e:
-        logger.info("No songwriter: %s", e)
+    data, model = await _ask(SONG_SYSTEM, asking, user, talk)
     caption = str(data.get("caption") or f"{CAPTIONS.get(fallback['style'], '')}, {words}")[:600]
     lyrics = _lyrics(data.get("lyrics"), instrumental or not data)
     if lyrics == "[Instrumental]" and "instrumental" not in caption.lower():
@@ -292,7 +305,7 @@ async def song_for(words: str, lang: str, lyrics_lang: str, instrumental: bool, 
     if bpm:
         spec["bpm"] = int(bpm)
     title = str(data.get("title") or fallback.get("title") or "")[:60]
-    return spec, title, model if data else "", str(data.get("why") or "")[:200]
+    return spec, title, model, str(data.get("why") or "")[:200]
 
 
 def engine_language(code: str) -> str:
@@ -347,7 +360,15 @@ def _voiced(caption: str) -> str:
 
 
 async def cover_for(
-    words: str, facts: str, title: str, vocals: str, user: str = "", *, heard: list[tuple[float, float, str]] | tuple = (), lang: str = "zh"
+    words: str,
+    facts: str,
+    title: str,
+    vocals: str,
+    user: str = "",
+    *,
+    heard: list[tuple[float, float, str]] | tuple = (),
+    lang: str = "zh",
+    talk: Talk | None = None,
 ) -> tuple[dict[str, Any], str, str, str]:
     """How the engine remakes a recording: (spec without the audio, title, who decided, why).
     ``vocals``: keep (sung again with the lines ``heard`` sung in the recording; with none heard
@@ -355,18 +376,7 @@ async def cover_for(
     no ``words`` the recording keeps its own style."""
     heard = list(heard)
     singing = vocals == "keep" and bool(heard)
-    data: dict[str, Any] = {}
-    model = ""
-    try:
-        asking = _cover_asking(words, facts, title, vocals, heard, lang)
-        reply = ai.stream(ROLE, COVER_SYSTEM, [{"role": "user", "content": asking}], max_tokens=MAX_TOKENS, user=user)
-        text = "".join([piece async for piece in reply])
-        model = reply.model
-        data = read_json(text)
-        if not data:
-            logger.warning("The remix producer gave no plan (stop: %s): %r", reply.stop, text[:200])
-    except ai.HubUnavailable as e:
-        logger.info("No remix producer: %s", e)
+    data, model = await _ask(COVER_SYSTEM, _cover_asking(words, facts, title, vocals, heard, lang), user, talk)
     caption = str(data.get("caption") or words or "a faithful new version of the same song, its own style and instruments")[:600]
     if singing:
         sung, caption = _sung_again(data.get("lyrics"), heard), _voiced(caption)
@@ -382,4 +392,4 @@ async def cover_for(
         "lyrics": sung,
         "cover_strength": _number(data.get("cover_strength"), low, 1.0, 0.8 if words else 1.0),
     }
-    return spec, str(data.get("title") or title)[:60], model if data else "", str(data.get("why") or "")[:200]
+    return spec, str(data.get("title") or title)[:60], model, str(data.get("why") or "")[:200]

@@ -9,7 +9,8 @@ from reflex_components_core.el.elements.inline import A
 from reflex_ddns_auth.intent import Intent, IntentState
 
 from music_studio.library import Source
-from music_studio.state import FINDER, Cue, Studio, Take, Video
+from music_studio.making import Part
+from music_studio.state import FINDER, Cue, Making, Studio, Take, Video
 
 T = Studio.t
 CARD = "rounded-2xl border border-white/10 bg-slate-900/70 p-4 sm:p-5"
@@ -253,6 +254,7 @@ def _take(row: Take) -> rx.Component:
                 rx.el.button(rx.icon("bookmark-plus", size=15), rx.cond(Studio.in_dialog, T["use"], T["keep"]), on_click=Studio.keep(row.id), data_testid="keep", class_name=PRIMARY),
             ),
             rx.cond(~Studio.in_dialog, _video_button(row)),
+            rx.cond(~Studio.in_dialog, _making_button(row)),
             rx.cond(
                 row.model != "",
                 rx.el.span(row.model, class_name="ml-auto truncate font-mono text-[11px] text-slate-500"),
@@ -274,6 +276,56 @@ def _video_button(row: Take) -> rx.Component:
         on_click=Video.open_film(row.id),
         data_testid="make-video",
         class_name=GHOST,
+    )
+
+
+# ------------------------------------------------------------------ How it was made
+
+
+def _making_button(row: Take) -> rx.Component:
+    return rx.el.button(rx.icon("notebook-text", size=15), T["mk_button"], on_click=Making.open_record(row.id), data_testid="making", class_name=GHOST)
+
+
+def _record_part(part: Part) -> rx.Component:
+    text = rx.cond(
+        part.mono,
+        rx.el.pre(part.body, class_name="mt-1 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-950/70 p-3 font-mono text-xs text-slate-200"),
+        rx.el.p(part.body, class_name="mt-1 whitespace-pre-wrap text-sm text-slate-200"),
+    )
+    return rx.cond(
+        part.fold,
+        rx.el.details(rx.el.summary(part.head, class_name="cursor-pointer text-sm font-semibold text-amber-300"), text, data_testid="making-part", class_name="mt-4"),
+        rx.el.div(rx.el.h3(part.head, class_name="text-sm font-semibold text-amber-300"), text, data_testid="making-part", class_name="mt-4"),
+    )
+
+
+def _record_dialog() -> rx.Component:
+    return rx.cond(
+        Making.record_open,
+        rx.el.div(
+            rx.el.div(
+                rx.el.div(
+                    rx.el.div(
+                        rx.el.h2(rx.icon("notebook-text", size=20, class_name="text-amber-400"), T["mk_head"], class_name="flex items-center gap-2 text-lg font-bold"),
+                        rx.el.p(Making.record_title, class_name="mt-1 truncate text-sm text-slate-300"),
+                        class_name="min-w-0",
+                    ),
+                    rx.el.button(rx.icon("x", size=18), on_click=Making.close_record, title=T["close"], data_testid="making-close", class_name="rounded-full p-2 text-slate-300 hover:bg-slate-800"),
+                    class_name="flex items-start justify-between gap-3",
+                ),
+                rx.el.p(T["mk_note"], class_name="mt-2 text-xs text-slate-400"),
+                rx.cond(Making.record_old, rx.el.p(T["mk_old"], data_testid="making-old", class_name="mt-3 rounded-xl bg-amber-400/10 px-3 py-2 text-sm text-amber-200")),
+                rx.foreach(Making.record_parts, _record_part),
+                rx.el.div(
+                    rx.el.button(rx.icon("copy", size=15), T["mk_copy"], on_click=Making.copy_record, data_testid="making-copy", class_name=GHOST),
+                    rx.el.button(T["close"], on_click=Making.close_record, class_name=GHOST),
+                    class_name="mt-5 flex flex-wrap justify-end gap-3",
+                ),
+                data_testid="making-dialog",
+                class_name="relative mx-auto my-4 w-full max-w-3xl rounded-2xl border border-white/10 bg-slate-900 p-4 text-slate-100 shadow-2xl sm:my-8 sm:p-6",
+            ),
+            class_name="fixed inset-0 z-50 overflow-y-auto bg-slate-950/80 px-3 backdrop-blur-sm",
+        ),
     )
 
 
@@ -551,6 +603,7 @@ def index() -> rx.Component:
             class_name="mx-auto max-w-4xl px-4 pb-16",
         ),
         _film_dialog(),
+        _record_dialog(),
         class_name="min-h-screen bg-slate-950 text-slate-100",
     )
 

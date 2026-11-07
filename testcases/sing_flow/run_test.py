@@ -1,7 +1,9 @@
 """With the music engine (through an AI Hub that has one): a song sung by the AI from a few words,
 the take playing with its lyrics shown, a whole remake of a library song without its singing, and
 one that keeps its singing: the AI hears the original's words and the engine sings them again, which
-the AI then hears in the new take (Make Video's listening, so it needs the speech model).
+the AI then hears in the new take (Make Video's listening, so it needs the speech model). Each take's
+record says who decided with which model, what the producer was told and answered, and what went
+to the engine.
 Skipped when the hub says there is no engine. Several minutes: the engine loads its models first.
 ``run_test.py sing``, ``run_test.py remake`` or ``run_test.py keep`` runs one part;
 ``REMAKE_SOURCE`` (a pattern its row matches, e.g. ``Lydia.*YouTube``) picks the song to remake,
@@ -30,6 +32,19 @@ def stages(page) -> set[str]:
             return seen
         seen.add(texts[0].split("（")[0].split(" (")[0])
         page.wait_for_timeout(2000)
+
+
+def read_record(take, name: str) -> str:
+    """A take's making record, as the page shows it (the producer's rules stay folded)."""
+    take.locator("[data-testid=making]").click()
+    page.wait_for_selector("[data-testid=making-dialog]")
+    record = page.inner_text("[data-testid=making-dialog]")
+    log("record:", record.replace("\n", " | ")[:500])
+    for part in ("誰做的", "AI 製作人收到的訊息", "AI 製作人的回答（原文）", "音樂模型做完後回報"):
+        assert part in record, part
+    shot(page, name)
+    page.click("[data-testid=making-close]")
+    return record
 
 
 with sync_playwright() as pw:
@@ -66,6 +81,8 @@ with sync_playwright() as pw:
         log("plays:", played)
         assert played["seconds"] > 20
         shot(page, "01_sung")
+        record = read_record(take, "01_sung_record")
+        assert "AI 製作人（smart）" in record and "交給音樂模型的內容" in record and "caption:" in record, "who wrote it, and what the engine got"
 
     def remake(vocals: str, how: str) -> tuple[set[str], str]:
         """A whole remake of the chosen library song; what the page said while it worked, and the take."""
@@ -99,13 +116,16 @@ with sync_playwright() as pw:
         page.click("[data-testid=tab-remake]")
         page.click("[data-testid=method-remake]")
         page.click("[data-testid=vocals-keep]")
-        assert "AI 的聲音" in page.inner_text("[data-testid=vocals-note]"), "says whose voice sings"
+        wait_for(lambda: "AI 的聲音" in page.inner_text("[data-testid=vocals-note]"), "says whose voice sings")
         seen, text = remake("keep", os.environ.get("REMAKE_HOW", "改成賽車遊戲"))
         assert any("聽原曲的歌詞" in stage for stage in seen), "the AI listened for the original's words"
         take = page.locator("[data-testid=take]").first
         assert take.locator("details").count() == 1, "sung again: the take has lyrics"
         log("lyrics:", (take.locator("details pre").text_content(timeout=5000) or "")[:300].replace("\n", " / "))
         shot(page, "03_kept_singing")
+        record = read_record(take, "03_kept_singing_record")
+        assert "聽原曲歌詞：Whisper" in record and "keep it, sung again" in record, "what was heard went to the producer"
+        assert "cover_strength:" in record and "audio_b64" not in record
         # The engine really sang them: the AI listens to the new take and finds the lines in it.
         take.locator("[data-testid=make-video]").click()
         page.wait_for_selector("[data-testid=video-dialog]")
