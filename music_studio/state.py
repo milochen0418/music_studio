@@ -110,7 +110,7 @@ class Studio(rx.State):
     voice: str = "none"  # none, or sing
     lyrics_lang: str = ""  # "" = the page's language
     method: str = ""  # tweak, remake; "" = remake when there is an engine
-    vocals: str = "keep"  # keep, remove, instrument (a remake)
+    vocals: str = "keep"  # keep (sung again), remove, instrument (a remake)
 
     @rx.var
     def t(self) -> dict[str, str]:
@@ -144,6 +144,10 @@ class Studio(rx.State):
     @rx.var
     def remaking(self) -> bool:
         return self.method == "remake" or (self.method == "" and bool(self.engine.get("ok")))
+
+    @rx.var
+    def vocals_note(self) -> str:
+        return self.t.get(f"vocals_{self.vocals}_note", "")
 
     @rx.var
     def hub_page(self) -> str:
@@ -347,17 +351,33 @@ class Studio(rx.State):
             self.takes = [_row(made), *self.takes]
         yield intent_update({"event": "take", "title": made["title"]})
 
-    async def _cover(self, path: Path, source: dict[str, str], title: str, how: str, vocals: str):
-        """The engine remakes a recording: new style, without the singing, or with an instrument
-        in its place."""
-        t = self.t
+    async def _cover(self, path: Path, source: dict[str, str], title: str, how: str, vocals: str, t: dict[str, str], lang: str):
+        """The engine remakes a recording, in a new style or its own: sung again with the words
+        heard in it, without the singing, or with an instrument playing its tune."""
         if path.stat().st_size > MAX_COVER_BYTES:
             raise ValueError("this recording is too big to remake (40 MB at most)")
         found = await asyncio.to_thread(remake.analyse, path)
-        spec, new_title, model, why = await producer.cover_for(how, found.facts(), _clean_title(title), vocals)
+        heard: list[tuple[float, float, str]] = []
+        language = ""
+        if vocals == "keep":
+            # The engine can't keep a singer: it sings what it is given, so it is given the words.
+
+            async def told(job: listen.Progress) -> None:
+                async with self:
+                    self.stage = _fill(t[f"hear_{job.phase}"], p=int(job.done * 100), mb=job.note)
+
+            async with self:
+                self.stage = t["hear_wait"]
+            said = await listen.hear_recording(path, source.get("language") or "", told)
+            heard, language = listen.sung(said), str(said.get("language") or "")
+        async with self:
+            self.stage = t["stage_planning"]
+        spec, new_title, model, why = await producer.cover_for(how, found.facts(), _clean_title(title), vocals, heard=heard, lang=lang)
+        if vocals == "keep" and not heard:
+            why = f"{t['no_singing_heard']} {why}".strip()
         spec["audio_b64"] = base64.b64encode(await asyncio.to_thread(path.read_bytes)).decode()
         spec["audio_format"] = path.suffix.lstrip(".").lower() or "mp3"
-        spec["language"] = "zh" if self.lang == "zh" else "en"
+        spec["language"] = (producer.engine_language(language) if heard else "") or ("zh" if lang == "zh" else "en")
         song = ai.music(spec)
         mp3 = await self._follow(song, t)
         made = await asyncio.to_thread(
@@ -378,6 +398,7 @@ class Studio(rx.State):
                 "plan": {"cover_strength": round(float(spec["cover_strength"]), 2), "vocals": vocals},
                 "lyrics": spec["lyrics"],
                 "caption": spec["caption"],
+                "language": spec["language"],
                 "engine": song.models,
             },
         )
@@ -394,15 +415,12 @@ class Studio(rx.State):
             if not self.picked:
                 self.error = t["need_source"]
                 return
-            if not how:
-                self.error = t["need_words"]
-                return
             remaking = self.remaking
             if remaking and not self.engine.get("ok"):
                 self.error = t["need_engine"]
                 return
             self.busy, self.error, self.stage = True, "", t["stage_reading"]
-            ref, upload, title, bars, vocals = self.source_ref, self.upload, self.source_title, BARS.get(self.length, 32), self.vocals
+            ref, upload, title, bars, vocals, lang = self.source_ref, self.upload, self.source_title, BARS.get(self.length, 32), self.vocals, self.lang
         try:
             if upload:
                 path: Path | None = drafts.data_dir() / "uploads" / upload
@@ -412,10 +430,13 @@ class Studio(rx.State):
             if path is None or not path.is_file():
                 raise FileNotFoundError(t["need_source"])
             if remaking:
-                await self._cover(path, source, title, how, vocals)
+                await self._cover(path, source, title, how, vocals, t, lang)
                 return
             found = await asyncio.to_thread(remake.analyse, path)
-            plan, model, why = await producer.plan_for(how, found.facts(), _clean_title(title))
+            if how:
+                plan, model, why = await producer.plan_for(how, found.facts(), _clean_title(title))
+            else:  # nothing asked for: the strongest stretch as a loop, as it sounds
+                plan, model, why = remake.Plan(title=_clean_title(title), room=0.0), "", t["tweak_as_is"]
             async with self:
                 self.stage = t["stage_changing"]
             made = await asyncio.to_thread(drafts.take_remade, path, plan, bars, found, source, how, model, why)

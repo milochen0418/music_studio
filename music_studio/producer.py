@@ -8,7 +8,8 @@ person asked for, and answers with how to change it (``remake.Plan``).
 With the music engine (ACE-Step through the hub, ``reflex_ddns_auth.ai.music``) the model writes
 the song instead: a caption in the engine's words, the lyrics in the language asked for, and for
 a remake the new version's caption and how far from the recording to go (``song_for``,
-``cover_for``); the engine sings and plays it.
+``cover_for``); the engine sings and plays it. The engine never keeps a recording's singer: to keep
+the singing, the words heard in the recording (``listen.hear_recording``) are sung again.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from typing import Any
 
 from reflex_ddns_auth import ai
 
+from music_studio import lyrics as lyric_lines
 from music_studio.composer import STYLES, Brief
 from music_studio.composer.synth import PATCHES
 from music_studio.composer.theory import NAMES, SCALES, key_root, parse_progression
@@ -72,12 +74,12 @@ Answer with one JSON object and nothing else:
   "why": "one sentence in the person's language on your choices"}
 For a piece without singing, lyrics is exactly "[Instrumental]" and the caption says instrumental."""
 
-COVER_SYSTEM = """You are a remix producer. A music model (ACE-Step) will remake an existing recording from your words: it keeps the recording's structure and melody as far as the cover strength allows, and plays and sings the new version.
+COVER_SYSTEM = """You are a remix producer. A music model (ACE-Step) will remake an existing recording from your words. It follows the recording's melody, structure and timing as far as the cover strength says, and plays and sings the new version itself from your caption and lyrics: it never keeps the original singer's voice, and it sings only the lyrics it is given.
 Answer with one JSON object and nothing else:
 {"title": "a short title in the person's language",
-  "caption": "the new version's music in English as comma-separated tags: genre, mood, tempo feel, instruments, the voice (or 'instrumental, no vocals' when the singing must go; name the instrument that takes the melody when it is to be played instead of sung)",
-  "lyrics": "exactly [Instrumental] when the singing must go or be played by an instrument; else the lyrics the person gave, or an empty string",
-  "cover_strength": a number from 0.2 to 1.0 (0.2 to 0.4 keeps the recording and changes its sound, 0.5 to 0.7 changes the arrangement too, 0.8 to 1.0 keeps only the song's bones),
+  "caption": "the new version's music in English as comma-separated tags: genre, mood, tempo feel, instruments, and the voice ('female vocal', 'male vocal', 'duet'), or 'instrumental, no vocals' when nobody sings; name the instrument that plays the melody when it is played instead of sung",
+  "lyrics": "what is sung, as the request says; exactly [Instrumental] when nothing is",
+  "cover_strength": a number from 0.5 to 1.0, how much of the making follows the recording (1.0 keeps its melody, structure and much of its arrangement and changes its sound as the caption says; 0.8 to 0.9 keeps the melody and structure and plays them the new way; 0.5 to 0.7 is a freer version that keeps the melody only roughly),
   "why": "one sentence in the person's language on your choices"}"""
 
 # Each style's caption for the engine, when there is no model to write one.
@@ -96,6 +98,10 @@ CAPTIONS = {
     "victory": "triumphant, fanfare, orchestral brass, uplifting, celebration",
 }
 LANGUAGES = ("zh", "en", "ja", "ko", "es", "fr", "de", "it", "pt", "ru")
+# The languages the engine sings in (ACE-Step's own list), for words heard in a recording.
+ENGINE_LANGUAGES = frozenset(
+    "ar az bg bn ca cs da de el en es fa fi fr he hi hr ht hu id is it ja ko la lt ms ne nl no pa pl pt ro ru sa sk sr sv sw ta te th tl tr uk ur vi yue zh".split()
+)
 
 # When there is no model to ask: words to a style. The first that matches wins.
 KEYWORDS: tuple[tuple[tuple[str, ...], dict[str, Any]], ...] = (
@@ -289,14 +295,71 @@ async def song_for(words: str, lang: str, lyrics_lang: str, instrumental: bool, 
     return spec, title, model if data else "", str(data.get("why") or "")[:200]
 
 
-async def cover_for(words: str, facts: str, title: str, vocals: str, user: str = "") -> tuple[dict[str, Any], str, str, str]:
+def engine_language(code: str) -> str:
+    """A language as the engine names it ("" when it doesn't sing in it)."""
+    code = str(code or "").strip().lower()
+    return code if code in ENGINE_LANGUAGES else ""
+
+
+def _cover_asking(words: str, facts: str, title: str, vocals: str, heard: list[tuple[float, float, str]], lang: str) -> str:
+    said = f'The recording: "{title}", {facts}.' if title else f"The recording: {facts}."
+    if words:
+        want = f"What the person wants: {words}"
+    else:
+        want = "What the person wants: nothing said: keep the recording's own style, instruments and feel, a faithful new version (cover strength near 1.0)."
+    if vocals == "remove":
+        sing = "The singing: take it out, an instrumental version. lyrics: [Instrumental]."
+    elif vocals == "instrument":
+        sing = "The singing: take it out and let an instrument play its melody. lyrics: [Instrumental]."
+    elif not heard:
+        sing = "The singing: speech recognition heard nobody sing in it, so there is none to keep: an instrumental version. lyrics: [Instrumental]."
+    else:
+        rows = "\n".join(f"[{lyric_lines.clock(start)}] {text}" for start, _, text in heard)
+        script = " Write Chinese in Traditional characters." if lang == "zh" else ""
+        sing = (
+            "The singing: keep it, sung again to the recording's melody. Speech recognition heard these lines in it "
+            "(start time, then the words; it mishears some words, and may write Chinese in simplified characters):\n"
+            f"{rows}\n"
+            "lyrics: these lines in order as the song's lyrics, each section under a tag on its own line ([Verse 1], [Chorus], "
+            "[Bridge], [Outro]). Mend only words that were plainly misheard, leave out only what is plainly not sung (a channel's "
+            f"or a subtitle's words), and never add or rewrite lines.{script}"
+        )
+    return f"{said}\n{want}\n{sing}"
+
+
+def _sung_again(answer: Any, heard: list[tuple[float, float, str]]) -> str:
+    """The lyrics to sing again: the model's tidy copy of the lines heard, when it is one (about as
+    many lines); else the heard lines as they are, in sections."""
+    text = str(answer or "").strip()
+    given = [line for group in lyric_lines.sections(text) for line in group]
+    if text.lower() not in ("[instrumental]", "[inst]", "instrumental") and 0.6 * len(heard) <= len(given) <= 1.5 * len(heard) + 4:
+        return text[:4000]
+    return lyric_lines.from_heard(heard)[:4000]
+
+
+def _voiced(caption: str) -> str:
+    """The caption with a singer in it and nothing that says nobody sings."""
+    tags = [tag.strip() for tag in caption.split(",") if tag.strip()]
+    tags = [tag for tag in tags if tag.lower() not in ("instrumental", "instrumental only", "no singing") and "no vocal" not in tag.lower()]
+    if not any(word in tag.lower() for tag in tags for word in ("vocal", "voice", "singer", "choir")):
+        tags.append("lead vocal")
+    return ", ".join(tags)
+
+
+async def cover_for(
+    words: str, facts: str, title: str, vocals: str, user: str = "", *, heard: list[tuple[float, float, str]] | tuple = (), lang: str = "zh"
+) -> tuple[dict[str, Any], str, str, str]:
     """How the engine remakes a recording: (spec without the audio, title, who decided, why).
-    ``vocals``: keep, remove or instrument (the melody played instead of sung)."""
+    ``vocals``: keep (sung again with the lines ``heard`` sung in the recording; with none heard
+    there is no singing to keep), remove, or instrument (the melody played instead of sung). With
+    no ``words`` the recording keeps its own style."""
+    heard = list(heard)
+    singing = vocals == "keep" and bool(heard)
     data: dict[str, Any] = {}
     model = ""
-    wish = {"remove": " Take the singing out: an instrumental version.", "instrument": " Take the singing out and let an instrument play its melody."}.get(vocals, "")
     try:
-        reply = ai.stream(ROLE, COVER_SYSTEM, [{"role": "user", "content": f"The recording: {facts}\nWhat the person wants: {words}{wish}"}], max_tokens=MAX_TOKENS, user=user)
+        asking = _cover_asking(words, facts, title, vocals, heard, lang)
+        reply = ai.stream(ROLE, COVER_SYSTEM, [{"role": "user", "content": asking}], max_tokens=MAX_TOKENS, user=user)
         text = "".join([piece async for piece in reply])
         model = reply.model
         data = read_json(text)
@@ -304,13 +367,19 @@ async def cover_for(words: str, facts: str, title: str, vocals: str, user: str =
             logger.warning("The remix producer gave no plan (stop: %s): %r", reply.stop, text[:200])
     except ai.HubUnavailable as e:
         logger.info("No remix producer: %s", e)
-    caption = str(data.get("caption") or words)[:600]
-    if vocals != "keep" and "instrumental" not in caption.lower():
-        caption = "instrumental, no vocals, " + caption
+    caption = str(data.get("caption") or words or "a faithful new version of the same song, its own style and instruments")[:600]
+    if singing:
+        sung, caption = _sung_again(data.get("lyrics"), heard), _voiced(caption)
+    else:
+        sung = "[Instrumental]"
+        if "instrumental" not in caption.lower():
+            caption = "instrumental, no vocals, " + caption
+    # Sung words must still fit the recording's tune, and so must a tune given to an instrument.
+    low = 0.7 if singing else 0.6 if vocals == "instrument" else 0.5
     spec = {
         "task": "cover",
         "caption": caption,
-        "lyrics": _lyrics(data.get("lyrics"), vocals != "keep"),
-        "cover_strength": _number(data.get("cover_strength"), 0.2, 1.0, 0.6 if vocals == "keep" else 0.8),
+        "lyrics": sung,
+        "cover_strength": _number(data.get("cover_strength"), low, 1.0, 0.8 if words else 1.0),
     }
     return spec, str(data.get("title") or title)[:60], model if data else "", str(data.get("why") or "")[:200]

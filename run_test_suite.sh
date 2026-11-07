@@ -103,7 +103,9 @@ fi
 
 echo "[runner] running test: $TEST_SCRIPT"
 set +e
-run_in_poetry_env python "$TEST_SCRIPT" >"$TEST_LOG" 2>&1
+# SUITE_ARGS: words for the suite itself (sing_flow's parts: sing, remake, keep).
+# shellcheck disable=SC2086
+run_in_poetry_env python "$TEST_SCRIPT" ${SUITE_ARGS:-} >"$TEST_LOG" 2>&1
 TEST_EXIT=$?
 set -e
 

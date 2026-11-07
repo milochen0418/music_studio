@@ -77,6 +77,21 @@ def has_times(text: str) -> bool:
     return bool(STAMP.search(text or ""))
 
 
+def from_heard(lines: list[tuple[float, float, str]], gap: float = 6.0) -> str:
+    """Lyrics for the music engine from the lines heard in a recording (start, end, text): a new
+    section, with its tag, wherever the singing pauses for ``gap`` seconds or more."""
+    out: list[str] = []
+    last = None
+    part = 0
+    for start, end, text in lines:
+        if last is None or start - last >= gap:
+            part += 1
+            out += ["", f"[Verse {part}]"] if out else [f"[Verse {part}]"]
+        out.append(text)
+        last = end
+    return "\n".join(out)
+
+
 def from_lrc(text: str) -> list[Line]:
     """The lines of LRC text (``[01:23.40]words``), by time. A line with several stamps is sung
     several times; lines without one are left out."""

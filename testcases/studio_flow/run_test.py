@@ -58,6 +58,16 @@ with sync_playwright() as pw:
     page.click("[data-testid=tab-remake]")
     page.wait_for_selector("[data-testid=source]", timeout=15000)
     page.locator("[data-testid=source]").first.click()
+    if page.locator("[data-testid=method-remake]").is_enabled():
+        page.click("[data-testid=method-tweak]")  # a hub with the engine picks the whole remake first
+    assert "原唱的聲音會留著" in page.inner_text("[data-testid=method-note]"), "says what adjusting keeps"
+    assert page.locator("[data-testid=vocals-keep]").count() == 0 and page.locator("[data-testid=length]").count() == 1
+    # Nothing written in the box: the strongest stretch as a loop, as it sounds (no error asks for words).
+    before = page.locator("[data-testid=take]").count()
+    page.click("[data-testid=change]")
+    wait_for(lambda: page.locator("[data-testid=take]").count() > before, "the take as it was", 120)
+    assert page.locator("[data-testid=error]").count() == 0
+    assert "聲音不變" in page.locator("[data-testid=take]").first.inner_text(), "says nothing was changed"
     page.fill("[data-testid=how]", "改成賽車用的，更快更有衝勁")
     before = page.locator("[data-testid=take]").count()
     page.click("[data-testid=change]")

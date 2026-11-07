@@ -5,7 +5,9 @@ Say what a piece of music is for and the AI writes it, or turn a song you have i
 ## Three ways to get music
 
 - **Compose.** Say the situation ("the last lap of a night race, tense but cool"). The AI Hub's model chooses the style, tempo, key and chords; the composer here writes every note and plays it. Twelve styles: synthwave, drum & bass, chiptune, rock, house, techno, orchestral, lo-fi, ambient, tropical, desert, victory. Two takes each time, about 3 seconds of work for a minute of music after the model answers.
-- **Change a song.** Pick one from the library, upload your own, or open YouTube to MP3's finder. The studio measures its tempo and key; the model decides how to change it (speed, pitch, tone, room, new drums); numpy and ffmpeg do it.
+- **Change a song.** Pick one from the library, upload your own, or open YouTube to MP3's finder (each row says where it came from: a version made here may carry its original's title). Two ways:
+  - **Adjust** works on the recording itself, so the original singing stays. The studio measures its tempo and key, the model decides how to change it (speed, pitch, tone, room, new drums), numpy and ffmpeg do it, and the strongest stretch becomes a seamless loop. With nothing written in the box, it is only cut into a loop, the sound unchanged.
+  - **The AI remakes the whole song** with the music engine (below), as long as the original. With nothing written, it keeps the song's own style.
 - **Use it in a game.** Other apps open the studio as a dialog (DDNS Intent `audio.make`, param `words`), and the take you keep goes back to them.
 
 Everything made loops without a seam: `loop_start` and `loop_end` in the item's `meta` say where to jump.
@@ -13,6 +15,13 @@ Everything made loops without a seam: `loop_start` and `loop_end` in the item's 
 ## With the music engine: singing, and whole remakes
 
 The composer here plays instruments only. For a song with singing, or to remake a recording outright (a new style, without the singing, an instrument playing its melody), the studio asks the AI Hub for the **music engine**, ACE-Step on the Mac (installed from the hub's page or with re_ddns's `macos_music_engine.sh`; see re_ddns's README). The hub's model then writes the lyrics and the song's description, the engine sings and plays it, and the take comes back here like any other. Without the engine those options are greyed out and the page says why.
+
+A whole remake follows the recording's melody, sections and timing, and plays and sings everything again from a description and lyrics. So for its singing there are three choices:
+
+- **Sung again, same words.** The engine never keeps the original singer's voice: it sings only the lyrics it is given (`[Instrumental]` means nobody sings). So the studio first listens to the recording with Whisper, the same speech model as Make Video's. It tells the language from a few windows across the song (its first half minute is often music alone, where Whisper's own guess goes wrong), and listens once more to any stretch of 12 seconds or more where it heard nothing (when unsure, Whisper guesses afresh each time, and a single listen can miss a whole verse: on Lydia the five lines checked were found 0 of 5 by one listen, 4 or 5 of 5 with the second). The lines it hears go to the hub's model, which puts them in sections and mends only words plainly misheard, and the engine sings them to the recording's tune. What was heard is kept by the file (`heard/` in the data folder), so a second remake of the same song doesn't listen again. When nobody is heard singing (a piece without vocals), the remake has no singing and says so.
+- **No singing**, or **an instrument plays the tune**.
+
+To keep the original singer's voice, use **Adjust**. How closely a remake follows the recording is `cover_strength`, the share of the engine's steps that follow it: 1.0 keeps its melody, structure and much of its arrangement, lower is freer. Sung words need at least 0.7 to fit the tune.
 
 What the engine's songs are not: they don't loop without a seam (a game starts them again), and a remake of someone else's recording stays theirs (`rights: third-party`).
 
@@ -40,7 +49,7 @@ The video plays in the dialog and downloads under its title. It is kept with the
 - `music_studio/remake.py`: tempo and key finding, and the changes.
 - `music_studio/drafts.py`, `library.py`: takes until they are kept, then `audio.file` items.
 - `music_studio/lyrics.py`: lyric lines without the section tags, LRC both ways, matching what was heard with the lyrics (`align`), and a first guess at the times when nobody listened.
-- `music_studio/listen.py`: Whisper ([faster-whisper](https://github.com/SYSTRAN/faster-whisper), int8 on the CPU, in this app as English Chat's subtitles are): the model's download (into the data folder), the listening, `heard.json`. `MUSIC_STUDIO_WHISPER` picks another model (`medium`, `small`, a Hugging Face repo or a folder); `MUSIC_STUDIO_WHISPER_THREADS` the CPU threads (8).
+- `music_studio/listen.py`: Whisper ([faster-whisper](https://github.com/SYSTRAN/faster-whisper), int8 on the CPU, in this app as English Chat's subtitles are): the model's download (into the data folder), the listening, `heard.json`; for a remake, the recording's words (`hear_recording`) and whether anybody sings in it at all (`sung`). `MUSIC_STUDIO_WHISPER` picks another model (`medium`, `small`, a Hugging Face repo or a folder); `MUSIC_STUDIO_WHISPER_THREADS` the CPU threads (8).
 - `music_studio/video.py`: the music video. Pillow draws the still pictures and the lyric lines (an FFmpeg built without libass or freetype, as Homebrew's, can't write text); numpy measures a row of levels a frame for the bars or the wave; FFmpeg moves, joins and encodes it all.
 
 ## Running it
@@ -64,4 +73,6 @@ DDNS_COLLECTIONS_ROOT=/tmp/collections FRONTEND_PORT=3175 BACKEND_PORT=8175 poet
 # With the speech model (a folder holding it; the app's data folder has one under models/ after its first download):
 MUSIC_STUDIO_WHISPER=<model folder> poetry run pytest tests/test_listen.py
 MUSIC_STUDIO_WHISPER=<model folder> DDNS_COLLECTIONS_ROOT=/tmp/collections FRONTEND_PORT=3175 BACKEND_PORT=8175 poetry run ./run_test_suite.sh listen_flow
+# With an AI Hub that has the music engine: one part of sing_flow (sing, remake or keep), on one song
+SUITE_ARGS=keep REMAKE_SOURCE=Lydia DDNS_COLLECTIONS_ROOT=/tmp/collections FRONTEND_PORT=3175 BACKEND_PORT=8175 poetry run ./run_test_suite.sh sing_flow
 ```

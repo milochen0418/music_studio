@@ -138,6 +138,12 @@ def _source_row(row: Source) -> rx.Component:
     return rx.el.button(
         rx.cond(Studio.source_ref == row.ref, rx.icon("circle-check", size=16, class_name="shrink-0 text-amber-400"), rx.icon("music-2", size=16, class_name="shrink-0 text-slate-500")),
         rx.el.span(row.title, class_name="min-w-0 flex-1 truncate text-left"),
+        # Where it came from: a version made here may carry the same title as its original.
+        rx.el.span(
+            rx.cond(row.origin == "music-studio", T["app"], rx.cond(row.origin == "youtube-to-mp3", "YouTube", row.origin)),
+            data_testid="source-from",
+            class_name="shrink-0 rounded-full bg-slate-800 px-2 py-0.5 text-[11px] text-slate-400",
+        ),
         rx.el.span(row.clock, class_name="shrink-0 font-mono text-xs text-slate-400"),
         on_click=Studio.choose_source(row.ref, row.title),
         data_testid="source",
@@ -150,9 +156,23 @@ def _finder_button() -> rx.Component:
     return rx.el.button(rx.icon("search", size=15), T["find"], on_click=rx.cond(IntentState.open_actions.contains(FINDER), Intent.show(FINDER), start), data_testid="find", class_name=GHOST)
 
 
+def _step(number: str, words, html_for: str = "") -> rx.Component:
+    return rx.el.label(
+        rx.el.span(number, class_name="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-400 text-[11px] font-bold text-slate-950"),
+        words,
+        html_for=html_for or None,
+        class_name="flex items-center gap-2 font-semibold",
+    )
+
+
+def _note(words, testid: str) -> rx.Component:
+    return rx.el.p(words, data_testid=testid, class_name="mt-2 text-xs leading-relaxed text-slate-400")
+
+
 def _remake() -> rx.Component:
+    method = rx.cond(Studio.remaking, "remake", "tweak")
     return rx.el.div(
-        rx.el.div(T["source"], class_name="font-semibold"),
+        _step("1", T["source"]),
         rx.el.div(
             rx.cond(Studio.sources.length() > 0, rx.foreach(Studio.sources, _source_row), rx.el.p(T["no_source"], class_name="p-3 text-sm text-slate-400")),
             data_testid="sources",
@@ -172,26 +192,35 @@ def _remake() -> rx.Component:
             rx.cond(Studio.upload != "", rx.el.span(rx.icon("circle-check", size=15, class_name="text-amber-400"), Studio.source_title, class_name="inline-flex items-center gap-1.5 text-sm text-slate-300")),
             class_name="mt-3 flex flex-wrap items-center gap-2",
         ),
+        rx.el.div(_step("2", T["method"]), class_name="mt-6"),
         rx.el.div(
-            rx.el.span(T["method"], class_name="mr-1 text-xs text-slate-400"),
-            _choice("method", rx.cond(Studio.remaking, "remake", "tweak"), "tweak", T["method_tweak"], Studio.set_method),
-            _choice("method", rx.cond(Studio.remaking, "remake", "tweak"), "remake", T["method_remake"], Studio.set_method, disabled=~Studio.engine_ok, tip=T["method_tip"]),
-            class_name="mt-4 flex flex-wrap items-center gap-2",
+            _choice("method", method, "tweak", T["method_tweak"], Studio.set_method),
+            _choice("method", method, "remake", T["method_remake"], Studio.set_method, disabled=~Studio.engine_ok, tip=T["method_tip"]),
+            class_name="mt-2 flex flex-wrap items-center gap-2",
         ),
+        _note(rx.cond(Studio.remaking, T["method_remake_note"], T["method_tweak_note"]), "method-note"),
         rx.cond(
             Studio.remaking,
             rx.el.div(
-                rx.el.span(T["vocals"], class_name="mr-1 text-xs text-slate-400"),
-                _choice("vocals", Studio.vocals, "keep", T["vocals_keep"], Studio.set_vocals),
-                _choice("vocals", Studio.vocals, "remove", T["vocals_remove"], Studio.set_vocals),
-                _choice("vocals", Studio.vocals, "instrument", T["vocals_instrument"], Studio.set_vocals),
-                class_name="mt-2 flex flex-wrap items-center gap-2",
+                rx.el.div(
+                    rx.el.span(T["vocals"], class_name="mr-1 text-xs text-slate-400"),
+                    _choice("vocals", Studio.vocals, "keep", T["vocals_keep"], Studio.set_vocals),
+                    _choice("vocals", Studio.vocals, "remove", T["vocals_remove"], Studio.set_vocals),
+                    _choice("vocals", Studio.vocals, "instrument", T["vocals_instrument"], Studio.set_vocals),
+                    class_name="flex flex-wrap items-center gap-2",
+                ),
+                _note(Studio.vocals_note, "vocals-note"),
+                class_name="mt-3 rounded-xl border border-slate-800 bg-slate-950/40 p-3",
             ),
         ),
-        rx.el.label(T["how"], html_for="how", class_name="mt-4 block font-semibold"),
-        rx.el.textarea(id="how", default_value=Studio.how, on_change=Studio.set_how, placeholder=T["how_hint"], rows=2, data_testid="how", class_name=f"{INPUT} mt-2 resize-y"),
-        rx.el.div(_length(), class_name="mt-3 flex max-w-xs"),
-        rx.el.p(rx.icon("info", size=14, class_name="mr-1 inline align-[-2px]"), T["rights_note"], class_name="mt-3 text-xs leading-relaxed text-amber-200/80"),
+        rx.el.div(_step("3", T["how"], "how"), class_name="mt-6"),
+        rx.el.textarea(id="how", default_value=Studio.how, on_change=Studio.set_how, placeholder=rx.cond(Studio.remaking, T["how_hint_remake"], T["how_hint"]), rows=2, data_testid="how", class_name=f"{INPUT} mt-2 resize-y"),
+        rx.cond(
+            Studio.remaking,
+            rx.el.p(T["remake_length"], data_testid="remake-length", class_name="mt-3 text-xs text-slate-400"),
+            rx.el.div(_length(), class_name="mt-3 flex max-w-xs"),
+        ),
+        rx.el.p(rx.icon("info", size=14, class_name="mr-1 inline align-[-2px]"), T["rights_note"], class_name="mt-4 text-xs leading-relaxed text-amber-200/80"),
         rx.el.button(rx.icon("wand-sparkles", size=16), rx.cond(Studio.busy, T["making"], T["change"]), on_click=Studio.change, disabled=Studio.busy, data_testid="change", class_name=f"{PRIMARY} mt-4"),
         class_name=CARD,
     )
@@ -224,7 +253,12 @@ def _take(row: Take) -> rx.Component:
                 rx.el.button(rx.icon("bookmark-plus", size=15), rx.cond(Studio.in_dialog, T["use"], T["keep"]), on_click=Studio.keep(row.id), data_testid="keep", class_name=PRIMARY),
             ),
             rx.cond(~Studio.in_dialog, _video_button(row)),
-            rx.cond(row.model != "", rx.el.span(row.model, class_name="ml-auto truncate font-mono text-[11px] text-slate-500"), rx.el.span(T["by_keywords"], class_name="ml-auto text-[11px] text-slate-500")),
+            rx.cond(
+                row.model != "",
+                rx.el.span(row.model, class_name="ml-auto truncate font-mono text-[11px] text-slate-500"),
+                # A take that says why it is as it is (nothing was asked for) didn't wait on the AI.
+                rx.cond(row.why == "", rx.el.span(T["by_keywords"], class_name="ml-auto text-[11px] text-slate-500")),
+            ),
             class_name="mt-3 flex flex-wrap items-center gap-3",
         ),
         data_testid="take",

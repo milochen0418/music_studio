@@ -83,7 +83,9 @@ def source_file(ref: str) -> tuple[Path | None, dict[str, str]]:
         return None, {}
     # What this app composed stays free to use; anything else may be somebody's.
     own = item.meta.get("rights") == "own"
-    return item.primary, {"ref": ref, "title": item.title, "rights": "own" if own else "third-party"}
+    # The language it is sung in, when the item says (the engine's songs do).
+    language = str(item.meta.get("language") or "")
+    return item.primary, {"ref": ref, "title": item.title, "rights": "own" if own else "third-party", "language": language}
 
 
 def _item_id(title: str) -> str:

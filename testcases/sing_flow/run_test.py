@@ -1,8 +1,14 @@
 """With the music engine (through an AI Hub that has one): a song sung by the AI from a few words,
-the take playing with its lyrics shown, and a whole remake of a library song without its singing.
+the take playing with its lyrics shown, a whole remake of a library song without its singing, and
+one that keeps its singing: the AI hears the original's words and the engine sings them again, which
+the AI then hears in the new take (Make Video's listening, so it needs the speech model).
 Skipped when the hub says there is no engine. Several minutes: the engine loads its models first.
-``run_test.py sing`` or ``run_test.py remake`` runs one part."""
+``run_test.py sing``, ``run_test.py remake`` or ``run_test.py keep`` runs one part;
+``REMAKE_SOURCE`` (a pattern its row matches, e.g. ``Lydia.*YouTube``) picks the song to remake,
+``REMAKE_HOW`` what it should become."""
 
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -12,7 +18,7 @@ from playwright.sync_api import sync_playwright  # noqa: E402
 from common import BASE_URL, finish, launch, log, new_page, shot, wait_for  # noqa: E402
 
 errors: list[str] = []
-PARTS = sys.argv[1:] or ["sing", "remake"]
+PARTS = sys.argv[1:] or ["sing", "remake", "keep"]
 
 
 def stages(page) -> set[str]:
@@ -61,26 +67,54 @@ with sync_playwright() as pw:
         assert played["seconds"] > 20
         shot(page, "01_sung")
 
-    if "remake" not in PARTS:
-        browser.close()
-        finish(errors)
-        raise SystemExit(0)
-    page.click("[data-testid=tab-remake]")
-    page.wait_for_selector("[data-testid=source]", timeout=15000)
-    page.locator("[data-testid=source]").first.click()
-    assert page.locator("[data-testid=method-remake]").is_enabled()
-    page.click("[data-testid=method-remake]")
-    page.click("[data-testid=vocals-instrument]")
-    page.fill("[data-testid=how]", "改成輕快的爵士版本")
-    before = page.locator("[data-testid=take]").count()
-    page.click("[data-testid=change]")
-    wait_for(lambda: page.locator("[data-testid=stage]").count() == 1, "working")
-    log("stages:", sorted(stages(page)))
-    assert page.locator("[data-testid=error]").count() == 0, page.locator("[data-testid=error]").inner_text()
-    wait_for(lambda: page.locator("[data-testid=take]").count() > before, "the remade take")
-    text = page.locator("[data-testid=take]").first.inner_text()
-    log("remade:", text.replace("\n", " | ")[:300])
-    assert "AI 重做" in text
-    shot(page, "02_remade")
+    def remake(vocals: str, how: str) -> tuple[set[str], str]:
+        """A whole remake of the chosen library song; what the page said while it worked, and the take."""
+        page.click("[data-testid=tab-remake]")
+        page.wait_for_selector("[data-testid=source]", timeout=15000)
+        rows = page.locator("[data-testid=source]")
+        pick = os.environ.get("REMAKE_SOURCE", "")
+        (rows.filter(has_text=re.compile(pick)).first if pick else rows.first).click()
+        assert page.locator("[data-testid=method-remake]").is_enabled()
+        page.click("[data-testid=method-remake]")
+        page.click(f"[data-testid=vocals-{vocals}]")
+        assert page.locator("[data-testid=length]").count() == 0, "a remake is as long as the song"
+        page.fill("[data-testid=how]", how)
+        before = page.locator("[data-testid=take]").count()
+        page.click("[data-testid=change]")
+        wait_for(lambda: page.locator("[data-testid=stage]").count() == 1, "working")
+        seen = stages(page)
+        log("stages:", sorted(seen))
+        assert page.locator("[data-testid=error]").count() == 0, page.locator("[data-testid=error]").inner_text()
+        wait_for(lambda: page.locator("[data-testid=take]").count() > before, "the remade take")
+        text = page.locator("[data-testid=take]").first.inner_text()
+        log("remade:", text.replace("\n", " | ")[:400])
+        assert "AI 重做" in text
+        return seen, text
+
+    if "remake" in PARTS:
+        remake("instrument", "改成輕快的爵士版本")
+        shot(page, "02_remade")
+
+    if "keep" in PARTS:
+        page.click("[data-testid=tab-remake]")
+        page.click("[data-testid=method-remake]")
+        page.click("[data-testid=vocals-keep]")
+        assert "AI 的聲音" in page.inner_text("[data-testid=vocals-note]"), "says whose voice sings"
+        seen, text = remake("keep", os.environ.get("REMAKE_HOW", "改成賽車遊戲"))
+        assert any("聽原曲的歌詞" in stage for stage in seen), "the AI listened for the original's words"
+        take = page.locator("[data-testid=take]").first
+        assert take.locator("details").count() == 1, "sung again: the take has lyrics"
+        log("lyrics:", (take.locator("details pre").text_content(timeout=5000) or "")[:300].replace("\n", " / "))
+        shot(page, "03_kept_singing")
+        # The engine really sang them: the AI listens to the new take and finds the lines in it.
+        take.locator("[data-testid=make-video]").click()
+        page.wait_for_selector("[data-testid=video-dialog]")
+        wait_for(lambda: "AI 聽過了" in page.inner_text("[data-testid=timed]"), "the AI heard the new take", 600)
+        timed = page.inner_text("[data-testid=timed]")
+        log("heard in the new take:", timed)
+        n, of = (int(x) for x in re.search(r"(\d+)／(\d+)", timed).groups())
+        assert n >= max(3, 0.3 * of), f"the engine sang the words ({n} of {of} lines heard)"
+        shot(page, "04_heard_in_new_take")
+        page.click("[data-testid=video-close]")
     browser.close()
 finish(errors)
