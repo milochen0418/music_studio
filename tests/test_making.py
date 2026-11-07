@@ -127,3 +127,37 @@ def test_a_loop_cut_as_it_sounds_says_nobody_was_asked():
     shown = making.parts(found, t)
     assert shown[0].body.splitlines() == [t["mk_not_asked"], t["mk_remaker"]]
     assert shown[1].body == t["mk_nothing"] and shown[-1].head == t["mk_to_remaker"]
+
+
+def test_a_remake_record_says_where_its_words_came_from_how_close_it_stayed_and_how_it_came_out():
+    t = TEXT["zh"]
+    found = making.record(
+        "cover",
+        "改成賽車遊戲",
+        producer.Talk(model=LABEL, system="rules", asked="msg", answer="{}", stop="end_turn", seconds=9.0),
+        "engine",
+        {"task": "cover", "caption": "racing", "lyrics": "[Verse 1]\nLydia", "cover_strength": 0.75},
+        engine={"models": {"dit": "acestep-v15-turbo"}, "metas": {"bpm": 81, "seed": 4242}, "seconds": 200.0, "id": "j"},
+        lyrics_from={"from": "lrclib", "artist": "F.I.R.", "track": "Lydia", "edited": True},
+        compare={"bpm": [81, 82], "key": ["A major", "A major"], "seconds": [236.0, 236.4], "lines": [20, 25]},
+    )
+    shown = making.parts(found, t)
+    who = shown[0].body
+    assert "歌詞：LRCLIB 的 F.I.R.《Lydia》，你改過" in who
+    assert "跟原曲多像：標準（8 步裡照著原曲 6 步）" in who and "seed 4242" in who
+    compare = shown[-1]
+    assert compare.head == t["mk_compare"] and compare.body.splitlines() == [
+        "速度：81 BPM → 82 BPM",
+        "調性：A major → A major",
+        "長度：3:56 → 3:56",
+        "AI 聽這一首：25 句歌詞裡聽到 20 句有唱",
+        t["mk_cmp_rough"],
+    ]
+
+
+def test_a_take_made_again_or_in_part_says_so():
+    t = TEXT["en"]
+    again = making.record("sung", "night race", {"role": "smart", "model": LABEL, "seconds": 8}, "engine", {"caption": "x"}, again_of={"id": "d1", "title": "Last Lap"})
+    assert making.parts(again, t)[0].body.splitlines()[0] == "Made again with the settings of “Last Lap”"
+    part = making.record("repaint", "Remade 1:05–1:30 only", None, "engine", {"task": "repaint", "repaint_start": 65.0, "repaint_end": 90.0})
+    assert making.parts(part, t)[0].body.splitlines()[0] == t["mk_by_you"]

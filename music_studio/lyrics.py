@@ -92,6 +92,86 @@ def from_heard(lines: list[tuple[float, float, str]], gap: float = 6.0) -> str:
     return "\n".join(out)
 
 
+def tagged(text: str) -> str:
+    """Lyrics as the music engine takes them: each part under a section tag. Parts are kept as
+    written where they have tags; untagged ones (split at blank lines) become ``[Verse n]``, or
+    ``[Chorus]`` when the same words come back later in the song."""
+    blocks: list[list[str]] = [[]]
+    for raw in STAMP.sub("", text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            if blocks[-1]:
+                blocks.append([])
+            continue
+        if TAG.match(line) and blocks[-1]:
+            blocks.append([])
+        blocks[-1].append(line)
+    blocks = [b for b in blocks if b]
+    if not blocks:
+        return ""
+    words = ["\n".join(b) for b in blocks]
+    out: list[str] = []
+    verse = 0
+    for block, said in zip(blocks, words):
+        if not TAG.match(block[0]):
+            if words.count(said) > 1:
+                block = ["[Chorus]", *block]
+            else:
+                verse += 1
+                block = [f"[Verse {verse}]", *block]
+        out.append("\n".join(block))
+    return "\n\n".join(out)
+
+
+def from_lrc_text(text: str) -> str:
+    """Plain lyrics from LRC (``[01:23.40]words``): the stamps dropped, an empty stamped line kept
+    as the blank line between parts."""
+    out = []
+    for raw in (text or "").splitlines():
+        line = STAMP.sub("", raw).strip()
+        if line or (out and out[-1]):
+            out.append(line)
+    return "\n".join(out).strip()
+
+
+_converter = None
+
+
+def traditional(text: str) -> str:
+    """Chinese in Traditional characters as written in Taiwan (OpenCC ``s2twp``): what the AI hears
+    often comes out in Simplified ones. Unchanged when OpenCC isn't installed."""
+    global _converter
+    if not text:
+        return text
+    if _converter is None:
+        try:
+            import opencc
+
+            try:
+                _converter = opencc.OpenCC("s2twp")
+            except Exception:  # noqa: BLE001 - older builds want the file name
+                _converter = opencc.OpenCC("s2twp.json")
+        except Exception:  # noqa: BLE001 - without it the words stay as they are
+            _converter = False
+    return _converter.convert(text) if _converter else text
+
+
+def script_language(text: str) -> str:
+    """The language lyrics are most likely written in, by their letters: zh, ja (kana), ko
+    (hangul), or en for Latin letters ("" when there are no letters)."""
+    kana = len(re.findall(r"[\u3040-\u30ff]", text or ""))
+    hangul = len(re.findall(r"[\uac00-\ud7af]", text or ""))
+    han = len(re.findall(r"[\u4e00-\u9fff]", text or ""))
+    latin = len(re.findall(r"[A-Za-zÀ-ÿ]", text or ""))
+    counts = {"ja": kana * 2, "ko": hangul, "zh": han, "en": latin / 3}
+    best = max(counts, key=lambda k: counts[k])
+    if counts[best] <= 0:
+        return ""
+    if best == "zh" and kana:
+        return "ja"
+    return best
+
+
 def from_lrc(text: str) -> list[Line]:
     """The lines of LRC text (``[01:23.40]words``), by time. A line with several stamps is sung
     several times; lines without one are left out."""

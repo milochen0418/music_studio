@@ -17,7 +17,8 @@ import reflex as rx
 from reflex_ddns_auth import ai
 from reflex_ddns_auth.intent import IntentPage, intent_update
 
-from music_studio import drafts, library, listen, lyrics, making, producer, remake, video
+from music_studio import drafts, library, listen, lrclib, lyrics, making, producer, remake, video
+from music_studio.composer import Brief
 from music_studio.i18n import SCENES, STYLE_NAMES, TEXT
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,11 @@ BARS = {"short": 16, "medium": 32, "long": 64}
 SECONDS = {"short": 60, "medium": 120, "long": 200}  # a sung song of each length
 FINDER = "audio.find"
 MAX_COVER_BYTES = 40 * 1024 * 1024
+# What of a take's engine request is sent again to make it again (the recording is read anew).
+AGAIN_KEYS = ("task", "caption", "lyrics", "language", "duration", "bpm", "cover_strength", "reference", "repaint_start", "repaint_end", "repaint_mode", "audio_format")
+# The words' languages the person can choose (Whisper's codes; the engine sings in each).
+WORD_LANGUAGES = [["zh", "中文"], ["yue", "粵語"], ["en", "English"], ["ja", "日本語"], ["ko", "한국어"], ["es", "Español"], ["fr", "Français"], ["de", "Deutsch"], ["it", "Italiano"], ["pt", "Português"], ["ru", "Русский"]]
+PATCH_SHORTEST, PATCH_LONGEST = 3.0, 90.0  # seconds: what ACE-Step's repaint is made for
 
 
 @dataclasses.dataclass
@@ -46,6 +52,9 @@ class Take:
     lyrics: str
     loops: bool
     has_video: bool = False  # rows kept in a session from before videos have none
+    level: str = ""  # a remake's closeness: close, standard, free
+    again_ok: bool = False  # its record says enough to make it again
+    patch_ok: bool = False  # made by the engine: a part of it can be made again
 
 
 def _clock(seconds: float) -> str:
@@ -54,6 +63,9 @@ def _clock(seconds: float) -> str:
 
 
 def _row(found: dict[str, Any]) -> Take:
+    plan = found.get("plan") if isinstance(found.get("plan"), dict) else {}
+    level = str(plan.get("closeness") or "") or (producer.level_of(plan.get("cover_strength")) if found.get("origin") == "cover" else "")
+    kept = drafts.making_path(found["id"]) is not None
     return Take(
         id=found["id"],
         title=found.get("title") or "",
@@ -72,7 +84,37 @@ def _row(found: dict[str, Any]) -> Take:
         lyrics="" if (found.get("lyrics") or "").strip().lower() in ("", "[instrumental]") else str(found.get("lyrics")),
         loops=float(found.get("loop_end") or 0) > 0,
         has_video=video.path(found["id"]) is not None,
+        level=level,
+        again_ok=kept and found.get("origin") in ("composed", "sung", "cover"),
+        patch_ok=bool(found.get("engine")),
     )
+
+
+def _numbered(title: str, taken: list[str]) -> str:
+    """A title for one more take like ``title``: ``title #2``, ``#3``…"""
+    base = re.sub(r" #\d+$", "", title or "")
+    n = 2
+    while f"{base} #{n}" in taken:
+        n += 1
+    return f"{base} #{n}"
+
+
+def _plain_clock(seconds: float) -> str:
+    m, s = divmod(int(round(seconds or 0)), 60)
+    return f"{m}:{s:02d}"
+
+
+def _compared(draft: str, recording: dict[str, Any]) -> dict[str, Any]:
+    """A take measured against the recording it was made from (its tempo, key and length)."""
+    path = drafts.audio_path(draft)
+    if path is None or not recording.get("seconds"):
+        return {}
+    out = remake.analyse(path)
+    return {
+        "bpm": [round(float(recording.get("bpm") or 0)), round(out.bpm)],
+        "key": [str(recording.get("key") or ""), f"{out.key} {out.mode}"],
+        "seconds": [round(float(recording["seconds"]), 1), round(out.seconds, 1)],
+    }
 
 
 def _fill(text: str, **values: Any) -> str:
@@ -111,6 +153,17 @@ class Studio(rx.State):
     lyrics_lang: str = ""  # "" = the page's language
     method: str = ""  # tweak, remake; "" = remake when there is an engine
     vocals: str = "keep"  # keep (sung again), remove, instrument (a remake)
+    closeness: str = ""  # "" = the AI producer chooses; close, standard, free
+    aim_sound: bool = False  # the recording also as the sound to aim for (experimental)
+    upload_own: bool = False  # the person says the uploaded recording is theirs to change
+    # The words a remake will sing again, shown to the person before the engine starts.
+    confirming: bool = False
+    confirm_lyrics: str = ""
+    confirm_language: str = ""
+    confirm_note: str = ""
+    confirm_from: str = ""  # lrclib, heard, none
+    confirm_version: int = 0  # a new suggestion: the box shows it afresh
+    _pending: dict[str, Any] = {}  # the remake waiting for its words
 
     @rx.var
     def t(self) -> dict[str, str]:
@@ -148,6 +201,14 @@ class Studio(rx.State):
     @rx.var
     def vocals_note(self) -> str:
         return self.t.get(f"vocals_{self.vocals}_note", "")
+
+    @rx.var
+    def closeness_note(self) -> str:
+        return self.t.get(f"closeness_{self.closeness or 'auto'}_note", "")
+
+    @rx.var
+    def word_languages(self) -> list[list[str]]:
+        return WORD_LANGUAGES
 
     @rx.var
     def hub_page(self) -> str:
@@ -230,14 +291,44 @@ class Studio(rx.State):
     @rx.event
     def set_method(self, value: str):
         self.method = value
+        self._drop_words()
 
     @rx.event
     def set_vocals(self, value: str):
         self.vocals = value
+        self._drop_words()
+
+    @rx.event
+    def set_closeness(self, value: str):
+        self.closeness = value if value in producer.LEVELS else ""
+
+    @rx.event
+    def set_aim_sound(self, value: bool):
+        self.aim_sound = bool(value)
+
+    @rx.event
+    def set_upload_own(self, value: bool):
+        self.upload_own = bool(value)
+
+    @rx.event
+    def set_confirm_lyrics(self, value: str):
+        self.confirm_lyrics = value
+
+    @rx.event
+    def set_confirm_language(self, value: str):
+        self.confirm_language = value
+
+    @rx.event
+    def cancel_words(self):
+        self._drop_words()
+
+    def _drop_words(self) -> None:
+        self.confirming, self._pending = False, {}
 
     @rx.event
     def choose_source(self, ref: str, title: str):
         self.source_ref, self.source_title, self.upload = ref, title, ""
+        self._drop_words()
 
     @rx.event
     async def uploaded(self, files: list[rx.UploadFile]):
@@ -248,6 +339,8 @@ class Studio(rx.State):
             (folder / name).write_bytes(await file.read())
             self.upload, self.source_ref = name, ""
             self.source_title = file.name or name
+            self.upload_own = False  # said anew for each recording
+            self._drop_words()
 
     # ---------------------------------------------- news from the YouTube dialog
 
@@ -357,41 +450,49 @@ class Studio(rx.State):
             self.takes = [_row(made), *self.takes]
         yield intent_update({"event": "take", "title": made["title"]})
 
-    async def _cover(self, path: Path, source: dict[str, str], title: str, how: str, vocals: str, t: dict[str, str], lang: str):
-        """The engine remakes a recording, in a new style or its own: sung again with the words
-        heard in it, without the singing, or with an instrument playing its tune."""
+    async def _cover(
+        self,
+        path: Path,
+        source: dict[str, str],
+        title: str,
+        how: str,
+        vocals: str,
+        t: dict[str, str],
+        lang: str,
+        *,
+        recording: dict[str, Any] | None = None,
+        closeness: str = "",
+        aim: bool = False,
+        words: str = "",
+        language: str = "",
+        listening: dict[str, Any] | None = None,
+        words_from: dict[str, Any] | None = None,
+    ):
+        """The engine remakes a recording, in a new style or its own: sung again with the words the
+        person checked (``words``, in ``language``), without the singing, or with an instrument
+        playing its tune. ``recording`` is what was measured in it, when it already was."""
         if path.stat().st_size > MAX_COVER_BYTES:
             raise ValueError("this recording is too big to remake (40 MB at most)")
-        found = await asyncio.to_thread(remake.analyse, path)
-        heard: list[tuple[float, float, str]] = []
-        language = ""
-        listening: dict[str, Any] | None = None
-        if vocals == "keep":
-            # The engine can't keep a singer: it sings what it is given, so it is given the words.
-
-            async def told(job: listen.Progress) -> None:
-                async with self:
-                    self.stage = _fill(t[f"hear_{job.phase}"], p=int(job.done * 100), mb=job.note)
-
-            async with self:
-                self.stage = t["hear_wait"]
-            said = await listen.hear_recording(path, source.get("language") or "", told)
-            heard, language = listen.sung(said), str(said.get("language") or "")
-            listening = {"model": said.get("model") or "", "language": language, "lines": len(heard)}
+        recording = recording or await asyncio.to_thread(_measured, path)
         async with self:
             self.stage = t["stage_planning"]
         talk = producer.Talk()
-        spec, new_title, model, why = await producer.cover_for(how, found.facts(), _clean_title(title), vocals, heard=heard, lang=lang, talk=talk)
-        if vocals == "keep" and not heard:
+        spec, new_title, model, why = await producer.cover_for(
+            how, recording["facts"], _clean_title(title), vocals, lyrics=words, closeness=closeness, lang=lang, talk=talk
+        )
+        sung = spec["lyrics"] != "[Instrumental]"
+        if vocals == "keep" and not sung:
             why = f"{t['no_singing_heard']} {why}".strip()
         spec["audio_b64"] = base64.b64encode(await asyncio.to_thread(path.read_bytes)).decode()
         spec["audio_format"] = path.suffix.lstrip(".").lower() or "mp3"
-        spec["language"] = (producer.engine_language(language) if heard else "") or ("zh" if lang == "zh" else "en")
+        spec["language"] = (producer.engine_language(language) if sung else "") or ("zh" if lang == "zh" else "en")
+        if aim:
+            spec["reference"] = "source"
         song = ai.music(spec)
         mp3 = await self._follow(song, t)
         request = {k: v for k, v in spec.items() if k != "audio_b64"}
-        request["source"] = {"title": source.get("title") or title, "bytes": path.stat().st_size}
-        record = making.record("cover", how, talk, "engine", request, engine=making.engine_said(song), listening=listening)
+        request["source"] = {"title": source.get("title") or title, "bytes": path.stat().st_size, **{k: source[k] for k in ("ref", "upload") if source.get(k)}}
+        record = making.record("cover", how, talk, "engine", request, engine=making.engine_said(song), listening=listening, lyrics_from=words_from)
         made = await asyncio.to_thread(
             drafts.take_engine,
             mp3,
@@ -403,11 +504,11 @@ class Studio(rx.State):
                 "model": model,
                 "why": why,
                 "mood": spec["caption"][:120],
-                "bpm": _whole(song.metas.get("bpm"), round(found.bpm)),
-                "key": _clean_meta(song.metas.get("keyscale")) or f"{found.key} {found.mode}",
+                "bpm": _whole(song.metas.get("bpm"), round(float(recording["bpm"]))),
+                "key": _clean_meta(song.metas.get("keyscale")) or str(recording["key"]),
                 "from_ref": source.get("ref") or "",
                 "from_title": source.get("title") or "",
-                "plan": {"cover_strength": round(float(spec["cover_strength"]), 2), "vocals": vocals},
+                "plan": {"cover_strength": spec["cover_strength"], "closeness": producer.level_of(spec["cover_strength"]), "vocals": vocals, "reference": aim},
                 "lyrics": spec["lyrics"],
                 "caption": spec["caption"],
                 "language": spec["language"],
@@ -415,8 +516,62 @@ class Studio(rx.State):
             },
             record,
         )
+        await self._add_compared(made, recording)
+
+    async def _add_compared(self, made: dict[str, Any], recording: dict[str, Any] | None) -> None:
+        """The new take beside the others, measured against its recording first (a few seconds)."""
+        if recording:
+            try:
+                compare = await asyncio.to_thread(_compared, made["id"], recording)
+                if compare:
+                    await asyncio.to_thread(drafts.update_making, made["id"], compare=compare)
+            except Exception:  # noqa: BLE001 - the take is there either way
+                logger.exception("Measuring a take against its recording failed")
         async with self:
             self.takes = [_row(made), *self.takes]
+
+    async def _find_words(self, path: Path, source: dict[str, str], title: str, t: dict[str, str], lang: str) -> None:
+        """The words a remake will sing again, for the person to check before the engine starts:
+        the song's lyrics from LRCLIB when it has them, else what the AI hears in the recording."""
+        recording = await asyncio.to_thread(_measured, path)
+        async with self:
+            self.stage = t["stage_lookup"]
+        hit = await lrclib.find(_clean_title(source.get("title") or title), float(recording["seconds"]))
+        if hit is not None:
+            language = producer.engine_language(lyrics.script_language(hit.lyrics))
+            text = lyrics.tagged(hit.lyrics)
+            if lang == "zh" and language in ("zh", "yue"):
+                text = lyrics.traditional(text)
+            note = _fill(t["confirm_lrclib"], artist=hit.artist, track=hit.track) + ("" if hit.near else t["confirm_lrclib_far"])
+            words_from: dict[str, Any] = {"from": "lrclib", **hit.as_dict()}
+            listening = None
+        else:
+            text, language, note, words_from, listening = await self._listen_words(path, source.get("language") or "", t, lang)
+        async with self:
+            self._pending = {"path": str(path), "source": source, "title": title, "recording": recording, "suggested": text, "words_from": words_from, "listening": listening}
+            self.confirm_lyrics, self.confirm_language, self.confirm_note = text, language, note
+            self.confirm_from = str(words_from["from"])
+            self.confirm_version += 1
+            self.confirming = True
+
+    async def _listen_words(self, path: Path, language: str, t: dict[str, str], lang: str):
+        """What the AI hears sung in a recording, as lyrics in parts: (text, its language, the note
+        for the person, where the words came from, the listening's record)."""
+
+        async def told(job: listen.Progress) -> None:
+            async with self:
+                self.stage = _fill(t[f"hear_{job.phase}"], p=int(job.done * 100), mb=job.note)
+
+        async with self:
+            self.stage = t["hear_wait"]
+        said = await listen.hear_recording(path, language, told)
+        heard, heard_in = listen.sung(said), str(said.get("language") or "")
+        text = lyrics.tagged(re.sub(r"^\[Verse \d+\]$", "", lyrics.from_heard(heard), flags=re.MULTILINE)) if heard else ""
+        if text and lang == "zh" and heard_in in ("zh", "yue"):
+            text = lyrics.traditional(text)
+        note = _fill(t["confirm_heard"], n=len(heard)) if heard else t["confirm_none"]
+        listening = {"model": said.get("model") or "", "language": heard_in, "lines": len(heard)}
+        return text, producer.engine_language(heard_in), note, {"from": "heard" if heard else "none"}, listening
 
     @rx.event(background=True)
     async def change(self):
@@ -432,18 +587,25 @@ class Studio(rx.State):
             if remaking and not self.engine.get("ok"):
                 self.error = t["need_engine"]
                 return
-            self.busy, self.error, self.stage = True, "", t["stage_reading"]
+            self.busy, self.error, self.stage, self.confirming = True, "", t["stage_reading"], False
             ref, upload, title, bars, vocals, lang = self.source_ref, self.upload, self.source_title, BARS.get(self.length, 32), self.vocals, self.lang
+            own, closeness, aim = self.upload_own, self.closeness, self.aim_sound
         try:
             if upload:
                 path: Path | None = drafts.data_dir() / "uploads" / upload
-                source = {"title": title, "rights": "own"}
+                # Somebody else's unless the person says it is theirs.
+                source = {"title": title, "rights": "own" if own else "third-party", "upload": upload}
             else:
                 path, source = await asyncio.to_thread(library.source_file, ref)
             if path is None or not path.is_file():
                 raise FileNotFoundError(t["need_source"])
             if remaking:
-                await self._cover(path, source, title, how, vocals, t, lang)
+                if vocals == "keep":
+                    # The engine can't keep a singer: it sings the words it is given, so they are
+                    # found first and shown to the person, who starts the remake with them.
+                    await self._find_words(path, source, title, t, lang)
+                else:
+                    await self._cover(path, source, title, how, vocals, t, lang, closeness=closeness, aim=aim)
                 return
             found = await asyncio.to_thread(remake.analyse, path)
             talk: producer.Talk | None = None
@@ -460,6 +622,137 @@ class Studio(rx.State):
                 self.takes = [_row(made), *self.takes]
         except Exception as e:  # noqa: BLE001 - said on the page
             logger.exception("Changing a song failed")
+            async with self:
+                self.error = t["failed"] + str(e)
+        finally:
+            async with self:
+                self.busy, self.stage = False, ""
+
+    @rx.event(background=True)
+    async def listen_words(self):
+        """The words as the AI hears them (in the language chosen, when one is) in place of the
+        ones shown."""
+        async with self:
+            t, lang = self.t, self.lang
+            if self.busy or not self._pending:
+                return
+            pending = dict(self._pending)
+            language = self.confirm_language
+            self.busy, self.error = True, ""
+        try:
+            text, heard_in, note, words_from, listening = await self._listen_words(Path(pending["path"]), language, t, lang)
+            async with self:
+                if self._pending.get("path") == pending["path"]:
+                    self._pending = {**self._pending, "suggested": text, "words_from": words_from, "listening": listening}
+                    self.confirm_lyrics, self.confirm_note, self.confirm_from = text, note, str(words_from["from"])
+                    self.confirm_language = heard_in or language
+                    self.confirm_version += 1
+        except Exception as e:  # noqa: BLE001 - said on the page
+            logger.exception("Listening for the words failed")
+            async with self:
+                self.error = t["failed"] + str(e)
+        finally:
+            async with self:
+                self.busy, self.stage = False, ""
+
+    @rx.event(background=True)
+    async def confirm_words(self):
+        """The remake, with the words as the person left them."""
+        async with self:
+            t, lang = self.t, self.lang
+            if self.busy or not self.confirming or not self._pending:
+                return
+            if not self.engine.get("ok"):
+                self.error = t["need_engine"]
+                return
+            pending = dict(self._pending)
+            words, language = self.confirm_lyrics, self.confirm_language
+            how, closeness, aim = self.how.strip(), self.closeness, self.aim_sound
+            self.busy, self.error, self.stage, self.confirming = True, "", t["stage_planning"], False
+        try:
+            words_from = dict(pending.get("words_from") or {})
+            if words.strip() and words_from.get("from") == "none":
+                words_from = {"from": "typed"}
+            elif words_from.get("from") in ("lrclib", "heard"):
+                words_from["edited"] = _same_words(words) != _same_words(str(pending.get("suggested") or ""))
+            await self._cover(
+                Path(pending["path"]),
+                pending["source"],
+                pending["title"],
+                how,
+                "keep",
+                t,
+                lang,
+                recording=pending.get("recording"),
+                closeness=closeness,
+                aim=aim,
+                words=words,
+                language=language,
+                listening=pending.get("listening"),
+                words_from=words_from,
+            )
+            async with self:
+                if self._pending.get("path") == pending["path"]:
+                    self._pending = {}
+        except Exception as e:  # noqa: BLE001 - said on the page
+            logger.exception("Remaking a song failed")
+            async with self:
+                self.error = t["failed"] + str(e)
+                self.confirming = bool(self._pending)  # the words stay, to try again
+        finally:
+            async with self:
+                self.busy, self.stage = False, ""
+
+    @rx.event(background=True)
+    async def again(self, draft: str):
+        """The same take made again: what its record says was asked, with a new random seed."""
+        async with self:
+            t = self.t
+            if self.busy:
+                return
+            taken = [row.title for row in self.takes]
+            engine_ok = bool(self.engine.get("ok"))
+            self.busy, self.error, self.stage = True, "", t["stage_writing"]
+        try:
+            take, rec = drafts.info(draft), drafts.making(draft)
+            if take is None or rec is None:
+                raise FileNotFoundError(t["gone"])
+            title = _numbered(str(take.get("title") or ""), taken)
+            again_of = {"id": draft, "title": take.get("title") or ""}
+            if rec.get("to") == "composer":
+                made = await asyncio.to_thread(_compose_again, take, rec, title, again_of)
+                async with self:
+                    self.takes = [_row(made), *self.takes]
+                return
+            if not engine_ok:
+                raise RuntimeError(t["need_engine"])
+            request = dict(rec.get("request") or {})
+            spec = {k: request[k] for k in AGAIN_KEYS if k in request}
+            if spec.get("task") in ("cover", "repaint"):
+                path = await asyncio.to_thread(_recording_of, request.get("source") or {}, take)
+                if path is None:
+                    raise FileNotFoundError(t["again_gone"])
+                spec["audio_b64"] = base64.b64encode(await asyncio.to_thread(path.read_bytes)).decode()
+                spec["audio_format"] = path.suffix.lstrip(".").lower() or "mp3"
+            song = ai.music(spec)
+            mp3 = await self._follow(song, t)
+            record = making.record(
+                str(rec.get("kind") or take.get("origin") or "sung"),
+                str(rec.get("words") or ""),
+                rec.get("producer"),
+                "engine",
+                request,
+                engine=making.engine_said(song),
+                listening=rec.get("listening"),
+                lyrics_from=rec.get("lyrics_from"),
+                again_of=again_of,
+            )
+            info = {k: take[k] for k in ("origin", "rights", "words", "model", "why", "mood", "from_ref", "from_title", "plan", "lyrics", "caption", "language") if k in take}
+            info.update(title=title, engine=song.models, bpm=_whole(song.metas.get("bpm"), _whole(take.get("bpm"))), key=_clean_meta(song.metas.get("keyscale")) or str(take.get("key") or ""))
+            made = await asyncio.to_thread(drafts.take_engine, mp3, info, record)
+            await self._add_compared(made, _recording_from(rec.get("compare") or {}))
+        except Exception as e:  # noqa: BLE001 - said on the page
+            logger.exception("Making a take again failed")
             async with self:
                 self.error = t["failed"] + str(e)
         finally:
@@ -499,6 +792,51 @@ def _clean_title(title: str) -> str:
     return re.sub(r"\.(mp3|wav|m4a|flac|ogg)$", "", title or "", flags=re.IGNORECASE)
 
 
+def _measured(path: Path) -> dict[str, Any]:
+    """What a recording is, as measured here: for the producer (``facts``) and to compare with."""
+    found = remake.analyse(path)
+    return {"facts": found.facts(), "bpm": round(found.bpm, 1), "key": f"{found.key} {found.mode}", "seconds": round(found.seconds, 2)}
+
+
+def _recording_from(compare: dict[str, Any]) -> dict[str, Any] | None:
+    """The recording's measures kept in a record's comparison (to measure a take made again)."""
+    pairs = [compare.get(k) for k in ("bpm", "key", "seconds")]
+    if not all(isinstance(pair, list) and len(pair) == 2 for pair in pairs):
+        return None
+    return {"bpm": pairs[0][0], "key": pairs[1][0], "seconds": pairs[2][0]}
+
+
+def _same_words(text: str) -> str:
+    return "\n".join(line.strip() for line in (text or "").splitlines() if line.strip())
+
+
+def _recording_of(source: dict[str, Any], take: dict[str, Any]) -> Path | None:
+    """The recording a take was made from, if it is still here: another take, an upload, or a
+    library song."""
+    if source.get("draft"):
+        return drafts.audio_path(str(source["draft"]))
+    if source.get("upload"):
+        path = drafts.data_dir() / "uploads" / Path(str(source["upload"])).name
+        return path if path.is_file() else None
+    ref = source.get("ref") or take.get("from_ref")
+    if ref:
+        path, _ = library.source_file(str(ref))
+        return path if path is not None and path.is_file() else None
+    return None
+
+
+def _compose_again(take: dict[str, Any], rec: dict[str, Any], title: str, again_of: dict[str, Any]) -> dict[str, Any]:
+    """A composed take again: the same brief, a new seed."""
+    fields = {f.name for f in dataclasses.fields(Brief)}
+    values = {k: v for k, v in (rec.get("request") or {}).items() if k in fields}
+    if isinstance(values.get("motif"), list):
+        values["motif"] = tuple(values["motif"])
+    brief = dataclasses.replace(Brief(**values), title=title)
+    seed = secrets.randbelow(1 << 30)
+    record = making.record(str(rec.get("kind") or "composed"), str(rec.get("words") or ""), rec.get("producer"), "composer", {**dataclasses.asdict(brief), "seed": seed}, again_of=again_of)
+    return drafts.take_composed(brief, seed, str(take.get("words") or ""), str(take.get("model") or ""), str(take.get("why") or ""), record)
+
+
 # ------------------------------------------------------------------ How a take was made
 
 
@@ -518,6 +856,51 @@ class Making(Studio):
     def record_old(self) -> bool:
         return bool(self.record.get("old"))
 
+    record_checking: str = ""  # while the AI listens to the take: how far it is
+
+    @rx.var
+    def record_can_check(self) -> bool:
+        """A sung take nobody counted the lines of yet."""
+        request = self.record.get("request") or {}
+        sung = str(request.get("lyrics") or "").strip().lower() not in ("", "[instrumental]")
+        lines = (self.record.get("compare") or {}).get("lines")
+        return sung and not self.record.get("old") and not lines
+
+    @rx.event(background=True)
+    async def check_lines(self):
+        """The AI listens to the take and counts the lines of its lyrics it hears sung."""
+        async with self:
+            t = self.t
+            draft = str(self.record.get("id") or "")
+            if not draft or self.record_checking:
+                return
+            take = drafts.info(draft) or {}
+            words = str(take.get("lyrics") or "")
+            texts = [line for group in lyrics.sections(words) for line in group]
+            language = listen.language_of(take, words)
+            self.record_checking = _fill(t["mk_checking"], p=0)
+
+        async def told(job: listen.Progress) -> None:
+            async with self:
+                self.record_checking = _fill(t["mk_checking"], p=int(job.done * 100))
+
+        try:
+            found = await listen.hear(draft, language, told)
+            lines = await asyncio.to_thread(_matched, texts, found)
+            compare = dict((drafts.making(draft) or {}).get("compare") or {})
+            compare["lines"] = [sum(1 for line in lines if line.heard), len(texts)]
+            await asyncio.to_thread(drafts.update_making, draft, compare=compare)
+            async with self:
+                if str(self.record.get("id") or "") == draft:
+                    self.record = making.of_take(drafts.info(draft) or {}, drafts.making(draft))
+        except Exception as e:  # noqa: BLE001 - said on the page
+            logger.exception("Counting the lines sung failed")
+            async with self:
+                self.error = t["failed"] + str(e)
+        finally:
+            async with self:
+                self.record_checking = ""
+
     @rx.event
     def open_record(self, draft: str):
         take = drafts.info(draft)
@@ -536,6 +919,151 @@ class Making(Studio):
     def copy_record(self):
         old = self.t["mk_old"] if self.record.get("old") else ""
         return [rx.set_clipboard(making.as_text(self.record_title, making.parts(self.record, self.t), old)), rx.toast.success(self.t["mk_copied"])]
+
+
+# ------------------------------------------------------------------ One part made again
+
+
+class Patch(Studio):
+    """Remake one part of a take (ACE-Step's repaint): the rest stays exactly as it is."""
+
+    patch_open: bool = False
+    patch_draft: str = ""
+    patch_title: str = ""
+    patch_seconds: float = 0.0
+    patch_start: str = ""
+    patch_end: str = ""
+    patch_lyrics: str = ""
+    patch_caption: str = ""
+    patch_mode: str = "balanced"
+    patch_error: str = ""
+    patch_version: int = 0  # a take opened: the boxes show its words afresh
+    _patch_language: str = ""
+
+    @rx.event
+    def open_patch(self, draft: str):
+        take = drafts.info(draft)
+        if take is None:
+            return rx.toast.error(self.t["gone"])
+        request = (drafts.making(draft) or {}).get("request") or {}
+        self.patch_draft, self.patch_title = draft, str(take.get("title") or "")
+        self.patch_seconds = float(take.get("seconds") or 0)
+        self.patch_lyrics = str(request.get("lyrics") or take.get("lyrics") or "")
+        self.patch_caption = str(request.get("caption") or take.get("caption") or "")
+        self._patch_language = str(request.get("language") or take.get("language") or ("zh" if self.lang == "zh" else "en"))
+        self.patch_start, self.patch_end, self.patch_mode, self.patch_error = "", "", "balanced", ""
+        self.patch_version += 1
+        self.patch_open = True
+        return None
+
+    @rx.event
+    def close_patch(self):
+        self.patch_open = False
+
+    @rx.event
+    def set_patch_start(self, value: str):
+        self.patch_start, self.patch_error = value, ""
+
+    @rx.event
+    def set_patch_end(self, value: str):
+        self.patch_end, self.patch_error = value, ""
+
+    @rx.event
+    def mark_start(self, at: float):
+        self.patch_start, self.patch_error = _plain_clock(float(at or 0)), ""
+
+    @rx.event
+    def mark_end(self, at: float):
+        self.patch_end, self.patch_error = _plain_clock(float(at or 0)), ""
+
+    @rx.event
+    def set_patch_lyrics(self, value: str):
+        self.patch_lyrics = value
+
+    @rx.event
+    def set_patch_caption(self, value: str):
+        self.patch_caption = value
+
+    @rx.event
+    def set_patch_mode(self, value: str):
+        self.patch_mode = value if value in ("balanced", "aggressive") else "balanced"
+
+    @rx.event(background=True)
+    async def make_patch(self):
+        async with self:
+            t = self.t
+            if self.busy:
+                return
+            if not self.engine.get("ok"):
+                self.patch_error = t["need_engine"]
+                return
+            start, end = _seconds_of(self.patch_start), _seconds_of(self.patch_end)
+            if start is None or end is None or not (0 <= start < end <= self.patch_seconds + 0.5) or not (PATCH_SHORTEST <= end - start <= PATCH_LONGEST):
+                self.patch_error = t["patch_bad"]
+                return
+            draft, words, caption, mode, language = self.patch_draft, self.patch_lyrics, self.patch_caption, self.patch_mode, self._patch_language
+            self.patch_open, self.patch_error = False, ""
+            self.busy, self.error, self.stage = True, "", t["stage_writing"]
+        try:
+            take, path = drafts.info(draft), drafts.audio_path(draft)
+            if take is None or path is None:
+                raise FileNotFoundError(t["gone"])
+            spec = {
+                "task": "repaint",
+                "caption": caption,
+                "lyrics": words.strip() or "[Instrumental]",
+                "language": language,
+                "audio_b64": base64.b64encode(await asyncio.to_thread(path.read_bytes)).decode(),
+                "audio_format": "mp3",
+                "repaint_start": round(start, 2),
+                "repaint_end": round(end, 2),
+                "repaint_mode": mode,
+            }
+            song = ai.music(spec)
+            mp3 = await self._follow(song, t)
+            a, b = _plain_clock(start), _plain_clock(end)
+            said = _fill(t["patch_words"], a=a, b=b)
+            request = {k: v for k, v in spec.items() if k != "audio_b64"}
+            request["source"] = {"draft": draft, "title": take.get("title") or ""}
+            record = making.record("repaint", said, None, "engine", request, engine=making.engine_said(song))
+            info = {k: take[k] for k in ("origin", "rights", "bpm", "key", "from_ref") if k in take}
+            info.update(
+                title=_fill(t["patch_title"], title=take.get("title") or "", a=a, b=b),
+                words=said,
+                model="",
+                why=said,
+                mood=caption[:120],
+                from_title=take.get("title") or "",
+                plan={"repaint": [round(start, 2), round(end, 2)], "mode": mode},
+                lyrics=spec["lyrics"],
+                caption=caption,
+                language=language,
+                engine=song.models,
+            )
+            made = await asyncio.to_thread(drafts.take_engine, mp3, info, record)
+            async with self:
+                self.takes = [_row(made), *self.takes]
+        except Exception as e:  # noqa: BLE001 - said on the page
+            logger.exception("Remaking a part failed")
+            async with self:
+                self.error = t["failed"] + str(e)
+        finally:
+            async with self:
+                self.busy, self.stage = False, ""
+
+
+def _seconds_of(text: str) -> float | None:
+    """A time as written: ``1:05``, ``1:05.5`` or ``65``."""
+    text = str(text or "").strip()
+    if not text:
+        return None
+    if ":" in text:
+        return lyrics.read_clock(text)
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
 
 
 # ------------------------------------------------------------------ Make Video

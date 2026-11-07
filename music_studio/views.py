@@ -10,7 +10,7 @@ from reflex_ddns_auth.intent import Intent, IntentState
 
 from music_studio.library import Source
 from music_studio.making import Part
-from music_studio.state import FINDER, Cue, Making, Studio, Take, Video
+from music_studio.state import FINDER, Cue, Making, Patch, Studio, Take, Video
 
 T = Studio.t
 CARD = "rounded-2xl border border-white/10 bg-slate-900/70 p-4 sm:p-5"
@@ -193,6 +193,14 @@ def _remake() -> rx.Component:
             rx.cond(Studio.upload != "", rx.el.span(rx.icon("circle-check", size=15, class_name="text-amber-400"), Studio.source_title, class_name="inline-flex items-center gap-1.5 text-sm text-slate-300")),
             class_name="mt-3 flex flex-wrap items-center gap-2",
         ),
+        rx.cond(
+            Studio.upload != "",
+            rx.el.label(
+                rx.checkbox(checked=Studio.upload_own, on_change=Studio.set_upload_own, data_testid="upload-own"),
+                rx.el.span(T["upload_own"]),
+                class_name="mt-2 flex items-center gap-2 text-sm text-slate-200",
+            ),
+        ),
         rx.el.div(_step("2", T["method"]), class_name="mt-6"),
         rx.el.div(
             _choice("method", method, "tweak", T["method_tweak"], Studio.set_method),
@@ -214,6 +222,7 @@ def _remake() -> rx.Component:
                 class_name="mt-3 rounded-xl border border-slate-800 bg-slate-950/40 p-3",
             ),
         ),
+        rx.cond(Studio.remaking, _closeness()),
         rx.el.div(_step("3", T["how"], "how"), class_name="mt-6"),
         rx.el.textarea(id="how", default_value=Studio.how, on_change=Studio.set_how, placeholder=rx.cond(Studio.remaking, T["how_hint_remake"], T["how_hint"]), rows=2, data_testid="how", class_name=f"{INPUT} mt-2 resize-y"),
         rx.cond(
@@ -222,8 +231,82 @@ def _remake() -> rx.Component:
             rx.el.div(_length(), class_name="mt-3 flex max-w-xs"),
         ),
         rx.el.p(rx.icon("info", size=14, class_name="mr-1 inline align-[-2px]"), T["rights_note"], class_name="mt-4 text-xs leading-relaxed text-amber-200/80"),
-        rx.el.button(rx.icon("wand-sparkles", size=16), rx.cond(Studio.busy, T["making"], T["change"]), on_click=Studio.change, disabled=Studio.busy, data_testid="change", class_name=f"{PRIMARY} mt-4"),
+        rx.cond(
+            Studio.confirming & Studio.remaking,
+            _confirm_words(),
+            rx.el.button(rx.icon("wand-sparkles", size=16), rx.cond(Studio.busy, T["making"], T["change"]), on_click=Studio.change, disabled=Studio.busy, data_testid="change", class_name=f"{PRIMARY} mt-4"),
+        ),
         class_name=CARD,
+    )
+
+
+def _closeness() -> rx.Component:
+    chosen = rx.cond(Studio.closeness == "", "auto", Studio.closeness)
+    return rx.el.div(
+        rx.el.div(
+            rx.el.span(T["closeness"], class_name="mr-1 text-xs text-slate-400"),
+            _choice("closeness", chosen, "auto", T["closeness_auto"], Studio.set_closeness),
+            _choice("closeness", chosen, "close", T["closeness_close"], Studio.set_closeness),
+            _choice("closeness", chosen, "standard", T["closeness_standard"], Studio.set_closeness),
+            _choice("closeness", chosen, "free", T["closeness_free"], Studio.set_closeness),
+            class_name="flex flex-wrap items-center gap-2",
+        ),
+        _note(Studio.closeness_note, "closeness-note"),
+        rx.el.label(
+            rx.checkbox(checked=Studio.aim_sound, on_change=Studio.set_aim_sound, data_testid="aim-sound"),
+            rx.el.span(T["aim_sound"]),
+            class_name="mt-3 flex items-center gap-2 text-sm text-slate-200",
+        ),
+        _note(T["aim_sound_note"], "aim-note"),
+        class_name="mt-3 rounded-xl border border-slate-800 bg-slate-950/40 p-3",
+    )
+
+
+def _confirm_words() -> rx.Component:
+    """The words a remake will sing, for the person to check (and change) before it starts."""
+    return rx.el.div(
+        rx.el.h3(rx.icon("list-checks", size=16, class_name="text-amber-400"), T["confirm_head"], class_name="flex items-center gap-2 font-semibold"),
+        rx.el.p(Studio.confirm_note, data_testid="confirm-note", class_name="mt-1 text-xs leading-relaxed text-slate-300"),
+        rx.el.div(
+            rx.el.label(T["confirm_language"], html_for="confirm-language", class_name="text-xs text-slate-400"),
+            rx.el.select(
+                rx.el.option("—", value=""),
+                rx.foreach(Studio.word_languages, lambda row: rx.el.option(row[1], value=row[0])),
+                id="confirm-language",
+                value=Studio.confirm_language,
+                on_change=Studio.set_confirm_language,
+                data_testid="confirm-language",
+                class_name="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100",
+            ),
+            rx.el.button(
+                rx.icon("ear", size=14),
+                rx.cond(Studio.confirm_from == "lrclib", T["confirm_listen"], T["confirm_listen_again"]),
+                on_click=Studio.listen_words,
+                disabled=Studio.busy,
+                data_testid="confirm-listen",
+                class_name=SMALL,
+            ),
+            class_name="mt-3 flex flex-wrap items-center gap-2",
+        ),
+        # Keyed by the suggestion: a new one shows afresh; typing (Chinese too) stays in the box.
+        rx.el.div(
+            rx.el.textarea(
+                id="confirm-lyrics",
+                default_value=Studio.confirm_lyrics,
+                on_change=Studio.set_confirm_lyrics,
+                rows=14,
+                data_testid="confirm-lyrics",
+                class_name=f"{INPUT} mt-2 resize-y font-mono text-xs leading-relaxed",
+            ),
+            key=Studio.confirm_version.to(str),
+        ),
+        rx.el.div(
+            rx.el.button(rx.icon("wand-sparkles", size=16), T["confirm_go"], on_click=Studio.confirm_words, disabled=Studio.busy, data_testid="confirm-go", class_name=PRIMARY),
+            rx.el.button(T["cancel"], on_click=Studio.cancel_words, disabled=Studio.busy, data_testid="confirm-cancel", class_name=GHOST),
+            class_name="mt-3 flex flex-wrap items-center gap-2",
+        ),
+        data_testid="confirm-words",
+        class_name="mt-4 rounded-xl border border-amber-400/40 bg-amber-400/5 p-3",
     )
 
 
@@ -242,7 +325,16 @@ def _take(row: Take) -> rx.Component:
         rx.image(src=row.wave, alt="", class_name="mt-3 h-8 w-full opacity-70"),
         rx.el.audio(src=BACKEND + "/_studio/take/" + row.id + ".mp3", controls=True, preload="none", class_name="mt-2 h-9 w-full"),
         rx.cond(row.origin == "sung", rx.el.p(rx.icon("mic-vocal", size=12, class_name="mr-1 inline align-[-1px]"), T["sung"], class_name="mt-2 text-xs text-pink-300")),
-        rx.cond(row.origin == "cover", rx.el.p(rx.icon("wand-sparkles", size=12, class_name="mr-1 inline align-[-1px]"), T["cover"], class_name="mt-2 text-xs text-violet-300")),
+        rx.cond(
+            row.origin == "cover",
+            rx.el.p(
+                rx.icon("wand-sparkles", size=12, class_name="mr-1 inline align-[-1px]"),
+                T["cover"],
+                rx.match(row.level, ("close", " · " + T["level_close"]), ("standard", " · " + T["level_standard"]), ("free", " · " + T["level_free"]), ""),
+                data_testid="take-kind",
+                class_name="mt-2 text-xs text-violet-300",
+            ),
+        ),
         rx.cond(row.why != "", rx.el.p("“", row.why, "”", class_name="mt-2 text-sm italic text-slate-300")),
         rx.cond(row.lyrics != "", rx.el.details(rx.el.summary("♪ ", T["lyrics"], class_name="cursor-pointer text-xs text-slate-400"), rx.el.pre(row.lyrics, class_name="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap font-sans text-xs text-slate-300"), class_name="mt-2")),
         rx.cond(row.from_title != "", rx.el.p(T["from"], " ", row.from_title, class_name="mt-1 truncate text-xs text-slate-400")),
@@ -262,6 +354,14 @@ def _take(row: Take) -> rx.Component:
                 rx.cond(row.why == "", rx.el.span(T["by_keywords"], class_name="ml-auto text-[11px] text-slate-500")),
             ),
             class_name="mt-3 flex flex-wrap items-center gap-3",
+        ),
+        rx.cond(
+            ~Studio.in_dialog & (row.again_ok | row.patch_ok),
+            rx.el.div(
+                rx.cond(row.again_ok, rx.el.button(rx.icon("refresh-cw", size=13), T["again"], on_click=Studio.again(row.id), disabled=Studio.busy, title=T["again_tip"], data_testid="again", class_name=SMALL)),
+                rx.cond(row.patch_ok, rx.el.button(rx.icon("scissors", size=13), T["patch"], on_click=Patch.open_patch(row.id), disabled=Studio.busy | ~Studio.engine_ok, data_testid="patch", class_name=SMALL)),
+                class_name="mt-2 flex flex-wrap items-center gap-2",
+            ),
         ),
         data_testid="take",
         class_name=CARD,
@@ -316,6 +416,17 @@ def _record_dialog() -> rx.Component:
                 rx.el.p(T["mk_note"], class_name="mt-2 text-xs text-slate-400"),
                 rx.cond(Making.record_old, rx.el.p(T["mk_old"], data_testid="making-old", class_name="mt-3 rounded-xl bg-amber-400/10 px-3 py-2 text-sm text-amber-200")),
                 rx.foreach(Making.record_parts, _record_part),
+                rx.cond(
+                    Making.record_can_check,
+                    rx.el.button(
+                        rx.icon("ear", size=15),
+                        rx.cond(Making.record_checking != "", Making.record_checking, T["mk_check"]),
+                        on_click=Making.check_lines,
+                        disabled=Making.record_checking != "",
+                        data_testid="making-check",
+                        class_name=f"{GHOST} mt-4",
+                    ),
+                ),
                 rx.el.div(
                     rx.el.button(rx.icon("copy", size=15), T["mk_copy"], on_click=Making.copy_record, data_testid="making-copy", class_name=GHOST),
                     rx.el.button(T["close"], on_click=Making.close_record, class_name=GHOST),
@@ -323,6 +434,81 @@ def _record_dialog() -> rx.Component:
                 ),
                 data_testid="making-dialog",
                 class_name="relative mx-auto my-4 w-full max-w-3xl rounded-2xl border border-white/10 bg-slate-900 p-4 text-slate-100 shadow-2xl sm:my-8 sm:p-6",
+            ),
+            class_name="fixed inset-0 z-50 overflow-y-auto bg-slate-950/80 px-3 backdrop-blur-sm",
+        ),
+    )
+
+
+# ------------------------------------------------------------------ One part made again
+
+PATCH_PLAYING = "(document.getElementById('patch-audio')?.currentTime ?? 0)"
+
+
+def _patch_playing_spec(e: rx.Var) -> tuple[rx.Var[float]]:
+    return (rx.Var(PATCH_PLAYING).to(float),)
+
+
+class AtPatchPlayer(rx.el.Button):
+    """A button that tells its handler where the one-part dialog's player is."""
+
+    on_click: rx.EventHandler[_patch_playing_spec]
+
+
+def _patch_time(label, value, setter, mark, testid: str) -> rx.Component:
+    return rx.el.label(
+        rx.el.span(label, class_name="mb-1 block text-xs text-slate-400"),
+        rx.el.div(
+            rx.el.input(value=value, on_change=setter, placeholder="1:05", data_testid=testid, class_name=f"{INPUT} w-28 font-mono"),
+            AtPatchPlayer.create(rx.icon("timer", size=13), on_click=mark, title=T["patch_here"], data_testid=f"{testid}-mark", class_name=SMALL),
+            class_name="flex items-center gap-2",
+        ),
+        class_name="block",
+    )
+
+
+def _patch_dialog() -> rx.Component:
+    return rx.cond(
+        Patch.patch_open,
+        rx.el.div(
+            rx.el.div(
+                rx.el.div(
+                    rx.el.div(
+                        rx.el.h2(rx.icon("scissors", size=20, class_name="text-amber-400"), T["patch_head"], class_name="flex items-center gap-2 text-lg font-bold"),
+                        rx.el.p(Patch.patch_title, class_name="mt-1 truncate text-sm text-slate-300"),
+                        class_name="min-w-0",
+                    ),
+                    rx.el.button(rx.icon("x", size=18), on_click=Patch.close_patch, title=T["close"], data_testid="patch-close", class_name="rounded-full p-2 text-slate-300 hover:bg-slate-800"),
+                    class_name="flex items-start justify-between gap-3",
+                ),
+                rx.el.p(T["patch_note"], class_name="mt-2 text-xs leading-relaxed text-slate-400"),
+                rx.el.audio(src=BACKEND + "/_studio/take/" + Patch.patch_draft + ".mp3", controls=True, preload="metadata", id="patch-audio", class_name="mt-3 h-9 w-full"),
+                rx.el.div(
+                    _patch_time(T["patch_from"], Patch.patch_start, Patch.set_patch_start, Patch.mark_start, "patch-start"),
+                    _patch_time(T["patch_to"], Patch.patch_end, Patch.set_patch_end, Patch.mark_end, "patch-end"),
+                    class_name="mt-3 flex flex-wrap gap-4",
+                ),
+                rx.el.div(
+                    rx.el.span(T["patch_mode"], class_name="mr-1 text-xs text-slate-400"),
+                    _choice("patch-mode", Patch.patch_mode, "balanced", T["patch_mode_balanced"], Patch.set_patch_mode),
+                    _choice("patch-mode", Patch.patch_mode, "aggressive", T["patch_mode_aggressive"], Patch.set_patch_mode),
+                    class_name="mt-4 flex flex-wrap items-center gap-2",
+                ),
+                rx.el.div(
+                    rx.el.label(T["patch_lyrics"], html_for="patch-lyrics", class_name="mt-4 mb-1 block text-xs text-slate-400"),
+                    rx.el.textarea(id="patch-lyrics", default_value=Patch.patch_lyrics, on_change=Patch.set_patch_lyrics, rows=8, data_testid="patch-lyrics", class_name=f"{INPUT} resize-y font-mono text-xs"),
+                    rx.el.label(T["patch_caption"], html_for="patch-caption", class_name="mt-3 mb-1 block text-xs text-slate-400"),
+                    rx.el.textarea(id="patch-caption", default_value=Patch.patch_caption, on_change=Patch.set_patch_caption, rows=2, data_testid="patch-caption", class_name=f"{INPUT} resize-y font-mono text-xs"),
+                    key=Patch.patch_version.to(str),
+                ),
+                rx.cond(Patch.patch_error != "", rx.el.p(Patch.patch_error, data_testid="patch-error", class_name="mt-3 rounded-xl bg-rose-950/60 px-3 py-2 text-sm text-rose-200")),
+                rx.el.div(
+                    rx.el.button(rx.icon("scissors", size=15), T["patch_make"], on_click=Patch.make_patch, disabled=Studio.busy, data_testid="patch-make", class_name=PRIMARY),
+                    rx.el.button(T["cancel"], on_click=Patch.close_patch, class_name=GHOST),
+                    class_name="mt-5 flex flex-wrap justify-end gap-3",
+                ),
+                data_testid="patch-dialog",
+                class_name="relative mx-auto my-4 w-full max-w-2xl rounded-2xl border border-white/10 bg-slate-900 p-4 text-slate-100 shadow-2xl sm:my-8 sm:p-6",
             ),
             class_name="fixed inset-0 z-50 overflow-y-auto bg-slate-950/80 px-3 backdrop-blur-sm",
         ),
@@ -604,6 +790,7 @@ def index() -> rx.Component:
         ),
         _film_dialog(),
         _record_dialog(),
+        _patch_dialog(),
         class_name="min-h-screen bg-slate-950 text-slate-100",
     )
 

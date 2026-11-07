@@ -51,7 +51,7 @@ def test_keeping_the_singing_sends_the_words_heard_in_the_recording(monkeypatch)
     assert spec["lyrics"] != "[Instrumental]"
     assert spec["lyrics"].startswith("[Verse 1]\n为何流浪") and "[Verse 2]\nLydia 幸福不在远方" in spec["lyrics"]
     assert "instrumental" not in spec["caption"].lower() and "vocal" in spec["caption"], spec["caption"]
-    assert spec["cover_strength"] >= 0.7, "the words must still fit the recording's tune"
+    assert spec["cover_strength"] in (0.75, 1.0), "the words must still fit the recording's tune: standard or close"
     nothing, *_ = asyncio.run(producer.cover_for("改成賽車遊戲", "236 s", "Lydia", "keep", heard=[]))
     assert nothing["lyrics"] == "[Instrumental]", "nobody heard singing: there is none to keep"
 
@@ -76,9 +76,53 @@ def test_what_the_producer_is_told_about_the_singing():
     assert "nothing said" in keep, "an empty wish keeps the song's own style"
     assert "Traditional" not in producer._cover_asking("x", "s", "t", "keep", HEARD, "en")
     assert "[Instrumental]" in producer._cover_asking("x", "s", "t", "remove", HEARD, "zh")
-    assert "heard nobody sing" in producer._cover_asking("x", "s", "t", "keep", [], "zh")
+    assert "no words to sing" in producer._cover_asking("x", "s", "t", "keep", [], "zh")
+    checked = producer._cover_asking("x", "s", "t", "keep", [], "zh", "[Verse 1]\n為何流浪", "free")
+    assert "the person has checked" in checked and checked.endswith("[Verse 1]\n為何流浪") and "chose the closeness: free" in checked
 
 
 def test_the_engine_sings_in_the_language_heard():
     assert producer.engine_language("zh") == "zh" and producer.engine_language("YUE") == "yue"
     assert producer.engine_language("haw") == "" and producer.engine_language("") == ""
+
+
+class _Reply:
+    def __init__(self, text):
+        self.text, self.model, self.stop = text, "", ""
+
+    def __aiter__(self):
+        return self._run()
+
+    async def _run(self):
+        self.model = "Fake producer"
+        yield self.text
+        self.stop = "end_turn"
+
+
+def _answer(monkeypatch, text):
+    monkeypatch.setattr(producer.ai, "stream", lambda *a, **k: _Reply(text))
+
+
+def test_closeness_is_one_of_three_levels_that_really_differ(monkeypatch):
+    assert [producer.steps_of(v) for v in producer.LEVELS.values()] == [4, 6, 8], "free, standard, close: 4, 6 and 8 of 8 steps"
+    assert producer.level_of(0.9) == "close" and producer.level_of(0.8) == "standard" and producer.level_of(0.55) == "free"
+    assert producer.level_of("n/a") == ""
+    _answer(monkeypatch, '{"title": "t", "caption": "jazz", "closeness": "free", "why": "w"}')
+    free, *_ = asyncio.run(producer.cover_for("改成爵士", "s", "t", "instrument"))
+    assert free["cover_strength"] == 0.5
+    sung, *_ = asyncio.run(producer.cover_for("改成爵士", "s", "t", "keep", lyrics="為何流浪\n心碎的海洋"))
+    assert sung["cover_strength"] == 0.75, "sung again: at least standard, whatever the producer says"
+    chosen, *_ = asyncio.run(producer.cover_for("改成爵士", "s", "t", "keep", lyrics="為何流浪", closeness="free"))
+    assert chosen["cover_strength"] == 0.5, "the person's own choice wins"
+    _answer(monkeypatch, '{"title": "t", "caption": "jazz", "cover_strength": 0.93}')
+    old, *_ = asyncio.run(producer.cover_for("x", "s", "t", "remove"))
+    assert old["cover_strength"] == 1.0, "a number is read as the nearest level"
+
+
+def test_lyrics_the_person_checked_are_sung_as_they_are(monkeypatch):
+    _answer(monkeypatch, '{"title": "極速", "caption": "racing, synth rock", "lyrics": "[Verse 1]\\ncompletely different", "closeness": "close"}')
+    spec, title, model, why = asyncio.run(producer.cover_for("改成賽車", "s", "Lydia", "keep", lyrics="Lydia 迷離的眼眶\n為何流浪\n\n他走了帶不走你的天堂"))
+    assert spec["lyrics"] == "[Verse 1]\nLydia 迷離的眼眶\n為何流浪\n\n[Verse 2]\n他走了帶不走你的天堂", "tagged, otherwise untouched"
+    assert "vocal" in spec["caption"] and spec["cover_strength"] == 1.0 and model == "Fake producer"
+    cleared, *_ = asyncio.run(producer.cover_for("改成賽車", "s", "Lydia", "keep", lyrics="  "))
+    assert cleared["lyrics"] == "[Instrumental]" and cleared["caption"].startswith("instrumental")

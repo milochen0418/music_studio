@@ -7,16 +7,23 @@ A take keeps this as ``making.json`` in its draft folder (:mod:`music_studio.dra
 take carries it into its library item. Version 1:
 
     {"version": 1,
-     "kind": "composed" | "sung" | "remake" | "cover",
+     "kind": "composed" | "sung" | "remake" | "cover" | "repaint" (one stretch of a take made again),
      "words": what the person wrote ("" when nothing),
      "producer": {"role", "model", "system", "asked", "answer", "stop", "seconds", "problem"},
                  or None when nobody was asked (a loop cut as the song sounds),
      "listening": {"model", "language", "lines"}: the speech model that heard the recording's
                   words, for a remake that sings them again,
+     "lyrics_from": {"from": "lrclib" | "heard" | "typed", "edited", ...}: where the words sung
+                  again came from (LRCLIB's song, what the AI heard, or the person's own) and
+                  whether the person changed them before the remake,
+     "again_of": {"id", "title"}: the take whose settings were used again (with a new seed),
+     "compare": {"bpm": [recording, take], "key": [...], "seconds": [...], "lines": [heard, all]}:
+                the take measured against what it was made from,
      "to": "engine" | "composer" | "remaker",
      "request": what was handed on: the engine's spec without the recording, the composer's
                 brief and seed, the remaker's plan,
-     "engine": {"models", "metas", "seconds", "id"}: what the engine said when it was done,
+     "engine": {"models", "metas", "seconds", "id"}: what the engine said when it was done
+               (``metas.seed`` makes the same song again from the same request),
      "id", "made_at"}
 
 Takes made before records were kept get what their ``info.json`` still says (``old``).
@@ -30,6 +37,9 @@ import re
 from typing import Any
 
 VERSION = 1
+# The engine's steps and the remake levels (as in producer: kept here so this module needs no model).
+STEPS = 8
+LEVELS = {"free": 0.5, "standard": 0.75, "close": 1.0}
 
 
 def record(
@@ -41,14 +51,16 @@ def record(
     *,
     engine: dict[str, Any] | None = None,
     listening: dict[str, Any] | None = None,
+    **more: Any,
 ) -> dict[str, Any]:
     """A take's making record. ``talk`` is the producer's :class:`~music_studio.producer.Talk`
-    (None when it wasn't asked)."""
+    (or its dict; None when it wasn't asked); ``more`` adds ``lyrics_from``, ``again_of``,
+    ``compare``."""
     found: dict[str, Any] = {
         "version": VERSION,
         "kind": kind,
         "words": words,
-        "producer": dataclasses.asdict(talk) if talk is not None else None,
+        "producer": talk if isinstance(talk, dict) or talk is None else dataclasses.asdict(talk),
         "to": to,
         "request": request,
     }
@@ -56,6 +68,7 @@ def record(
         found["listening"] = listening
     if engine:
         found["engine"] = engine
+    found.update({k: v for k, v in more.items() if v})
     return found
 
 
@@ -133,11 +146,23 @@ def _engine_name(models: dict[str, Any]) -> str:
     return f"ACE-Step ({', '.join(names)})" if names else "ACE-Step"
 
 
+def _level_line(request: dict[str, Any], t: dict[str, str]) -> str:
+    try:
+        strength = float(request["cover_strength"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    name = min(LEVELS, key=lambda k: abs(LEVELS[k] - strength))
+    return _fill(t["mk_level"], level=t.get(f"level_{name}", name), n=int(STEPS * strength), all=STEPS)
+
+
 def _who(found: dict[str, Any], t: dict[str, str]) -> str:
     rows = []
+    again = found.get("again_of") or {}
+    if again:
+        rows.append(_fill(t["mk_again"], title=again.get("title") or again.get("id") or ""))
     talk = found.get("producer")
     if not talk:
-        rows.append(t["mk_not_asked"])
+        rows.append(t["mk_by_you"] if found.get("kind") == "repaint" else t["mk_not_asked"])
     elif talk.get("model") and not talk.get("problem"):
         line = _fill(t["mk_producer"], role=talk.get("role") or "smart", model=talk["model"])
         if talk.get("seconds"):
@@ -148,12 +173,22 @@ def _who(found: dict[str, Any], t: dict[str, str]) -> str:
     heard = found.get("listening")
     if heard:
         rows.append(_fill(t["mk_listener"], model=heard.get("model") or "", language=heard.get("language") or "?", n=heard.get("lines") or 0))
+    words = found.get("lyrics_from") or {}
+    if words.get("from") in ("lrclib", "heard", "typed"):
+        line = _fill(t[f"mk_words_{words['from']}"], artist=words.get("artist") or "", track=words.get("track") or "")
+        rows.append(line + (t["mk_words_edited"] if words.get("edited") else ""))
+    level = _level_line(found.get("request") or {}, t)
+    if level:
+        rows.append(level)
     to = found.get("to")
     if to == "engine":
         engine = found.get("engine") or {}
         line = _fill(t["mk_engine"], name=_engine_name(engine.get("models") or {}))
         if engine.get("seconds"):
             line += _fill(t["mk_took"], s=round(float(engine["seconds"])))
+        seed = (engine.get("metas") or {}).get("seed")
+        if seed not in (None, ""):
+            line += _fill(t["mk_seed"], seed=seed)
         rows.append(line)
     elif to == "composer":
         rows.append(t["mk_composer"])
@@ -182,7 +217,33 @@ def parts(found: dict[str, Any], t: dict[str, str]) -> list[Part]:
     metas = {k: v for k, v in ((found.get("engine") or {}).get("metas") or {}).items() if v not in (None, "", "N/A")}
     if metas:
         out.append(Part(t["mk_engine_said"], handed(metas), mono=True))
+    compared = compare_text(found.get("compare") or {}, t)
+    if compared:
+        out.append(Part(t["mk_compare"], compared))
     return out
+
+
+def _clock(seconds: Any) -> str:
+    m, s = divmod(int(round(float(seconds or 0))), 60)
+    return f"{m}:{s:02d}"
+
+
+def compare_text(compare: dict[str, Any], t: dict[str, str]) -> str:
+    """The take against what it was made from, a line each: tempo, key, length, lines sung."""
+    rows = []
+    for name, show in (("bpm", lambda v: f"{float(v):.0f} BPM"), ("key", str), ("seconds", _clock)):
+        pair = compare.get(name)
+        if isinstance(pair, (list, tuple)) and len(pair) == 2 and all(v not in (None, "") for v in pair):
+            rows.append(_fill(t[f"mk_cmp_{name}"], a=show(pair[0]), b=show(pair[1])))
+    measured = bool(rows)
+    lines = compare.get("lines")
+    if isinstance(lines, (list, tuple)) and len(lines) == 2:
+        rows.append(_fill(t["mk_cmp_lines"], n=lines[0], all=lines[1]))
+    if measured:
+        # Measured by a program: a tempo found at twice or half the speed, or a key a fifth away,
+        # is often the same song as heard.
+        rows.append(t["mk_cmp_rough"])
+    return "\n".join(rows)
 
 
 def _fence(body: str) -> str:

@@ -282,7 +282,8 @@ async def _hear(
             before = json.loads(kept.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             before = None
-        if before and before.get("model") == MODEL:
+        # Heard before, unless a language is asked for now that it wasn't heard in.
+        if before and before.get("model") == MODEL and (not language or before.get("language") == language):
             return before
     if key in _busy:
         raise RuntimeError("this song is being listened to already")
@@ -315,7 +316,8 @@ async def hear(draft: str, language: str = "", told: Callable[[Progress], Awaita
 async def hear_recording(path: Path, language: str = "", told: Callable[[Progress], Awaitable[None]] | None = None) -> dict[str, Any]:
     """Listens to a recording about to be remade (or gives back what was heard in it before), for
     the words sung in it: ``lines`` of [start, end, text] beside the words. ``language`` is the
-    one it is sung in, if known ("" lets Whisper tell)."""
+    one it is sung in, if known ("" lets Whisper tell); asked for in another one than before, it
+    listens again."""
     stat = path.stat()
     key = hashlib.sha1(f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode()).hexdigest()[:20]
     return await _hear(f"recording-{key}", path, drafts.data_dir() / "heard" / f"{key}.json", language, told, False, gaps_again=True)

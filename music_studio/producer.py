@@ -79,12 +79,12 @@ Answer with one JSON object and nothing else:
   "why": "one sentence in the person's language on your choices"}
 For a piece without singing, lyrics is exactly "[Instrumental]" and the caption says instrumental."""
 
-COVER_SYSTEM = """You are a remix producer. A music model (ACE-Step) will remake an existing recording from your words. It follows the recording's melody, structure and timing as far as the cover strength says, and plays and sings the new version itself from your caption and lyrics: it never keeps the original singer's voice, and it sings only the lyrics it is given.
+COVER_SYSTEM = """You are a remix producer. A music model (ACE-Step) will remake an existing recording from your words. It draws a coarse skeleton of the recording (melody, sections, timing) and makes a new performance on it from your caption and lyrics: it plays and sings everything itself, never keeps the original singer's voice, sings only the lyrics it is given, and even at its closest the result sits between a cover and a remix, never a copy.
 Answer with one JSON object and nothing else:
 {"title": "a short title in the person's language",
   "caption": "the new version's music in English as comma-separated tags: genre, mood, tempo feel, instruments, and the voice ('female vocal', 'male vocal', 'duet'), or 'instrumental, no vocals' when nobody sings; name the instrument that plays the melody when it is played instead of sung",
   "lyrics": "what is sung, as the request says; exactly [Instrumental] when nothing is",
-  "cover_strength": a number from 0.5 to 1.0, how much of the making follows the recording (1.0 keeps its melody, structure and much of its arrangement and changes its sound as the caption says; 0.8 to 0.9 keeps the melody and structure and plays them the new way; 0.5 to 0.7 is a freer version that keeps the melody only roughly),
+  "closeness": how closely the new version follows the recording's skeleton: "close" (all the way: the same melody, sections and timing, a new sound as the caption says; for a faithful version), "standard" (for most of the making: the melody and sections stay recognisable, played more freely; for a new style that still sounds like the song), or "free" (only at the start: the melody only roughly, room for a whole new genre),
   "why": "one sentence in the person's language on your choices"}"""
 
 # Each style's caption for the engine, when there is no model to write one.
@@ -103,6 +103,11 @@ CAPTIONS = {
     "victory": "triumphant, fanfare, orchestral brass, uplifting, celebration",
 }
 LANGUAGES = ("zh", "en", "ja", "ko", "es", "fr", "de", "it", "pt", "ru")
+# How closely a remake follows its recording. ACE-Step follows the recording's skeleton for
+# int(steps * cover_strength) of its STEPS steps, so only whole steps make a difference: three
+# levels that do (8, 6 and 4 of 8), weakest first.
+STEPS = 8
+LEVELS = {"free": 0.5, "standard": 0.75, "close": 1.0}
 # The languages the engine sings in (ACE-Step's own list), for words heard in a recording.
 ENGINE_LANGUAGES = frozenset(
     "ar az bg bn ca cs da de el en es fa fi fr he hi hr ht hu id is it ja ko la lt ms ne nl no pa pl pt ro ru sa sk sr sv sw ta te th tl tr uk ur vi yue zh".split()
@@ -308,24 +313,59 @@ async def song_for(
     return spec, title, model, str(data.get("why") or "")[:200]
 
 
+def level_of(strength: Any) -> str:
+    """The level a cover strength makes (old takes say a number)."""
+    try:
+        value = float(strength)
+    except (TypeError, ValueError):
+        return ""
+    return min(LEVELS, key=lambda name: abs(LEVELS[name] - value))
+
+
+def steps_of(strength: Any) -> int:
+    """How many of the engine's steps follow the recording at this strength."""
+    try:
+        return int(STEPS * float(strength))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _level(data: dict[str, Any], lowest: str, fallback: str) -> str:
+    """The producer's level (or the nearest to a number it gave), never below ``lowest``."""
+    level = str(data.get("closeness") or "").strip().lower()
+    if level not in LEVELS:
+        level = level_of(data.get("cover_strength")) or fallback
+    order = list(LEVELS)
+    return level if order.index(level) >= order.index(lowest) else lowest
+
+
 def engine_language(code: str) -> str:
     """A language as the engine names it ("" when it doesn't sing in it)."""
     code = str(code or "").strip().lower()
     return code if code in ENGINE_LANGUAGES else ""
 
 
-def _cover_asking(words: str, facts: str, title: str, vocals: str, heard: list[tuple[float, float, str]], lang: str) -> str:
+def _cover_asking(
+    words: str, facts: str, title: str, vocals: str, heard: list[tuple[float, float, str]], lang: str, lyrics: str = "", closeness: str = ""
+) -> str:
     said = f'The recording: "{title}", {facts}.' if title else f"The recording: {facts}."
     if words:
         want = f"What the person wants: {words}"
     else:
-        want = "What the person wants: nothing said: keep the recording's own style, instruments and feel, a faithful new version (cover strength near 1.0)."
-    if vocals == "remove":
+        want = "What the person wants: nothing said: keep the recording's own style, instruments and feel, a faithful new version (closeness: close)."
+    if closeness in LEVELS:
+        want += f"\nThe person chose the closeness: {closeness}."
+    if vocals == "keep" and lyrics:
+        sing = (
+            "The singing: keep it, sung again to the recording's melody with these lyrics, which the person has checked. "
+            "They are sent as they are, so leave lyrics out of your answer; choose a voice that suits them.\n" + lyrics
+        )
+    elif vocals == "remove":
         sing = "The singing: take it out, an instrumental version. lyrics: [Instrumental]."
     elif vocals == "instrument":
         sing = "The singing: take it out and let an instrument play its melody. lyrics: [Instrumental]."
     elif not heard:
-        sing = "The singing: speech recognition heard nobody sing in it, so there is none to keep: an instrumental version. lyrics: [Instrumental]."
+        sing = "The singing: there are no words to sing (none were found in it, or the person left them out): an instrumental version. lyrics: [Instrumental]."
     else:
         rows = "\n".join(f"[{lyric_lines.clock(start)}] {text}" for start, _, text in heard)
         script = " Write Chinese in Traditional characters." if lang == "zh" else ""
@@ -367,29 +407,32 @@ async def cover_for(
     user: str = "",
     *,
     heard: list[tuple[float, float, str]] | tuple = (),
+    lyrics: str = "",
+    closeness: str = "",
     lang: str = "zh",
     talk: Talk | None = None,
 ) -> tuple[dict[str, Any], str, str, str]:
     """How the engine remakes a recording: (spec without the audio, title, who decided, why).
-    ``vocals``: keep (sung again with the lines ``heard`` sung in the recording; with none heard
-    there is no singing to keep), remove, or instrument (the melody played instead of sung). With
-    no ``words`` the recording keeps its own style."""
+    ``vocals``: keep (sung again with ``lyrics`` the person checked, or the lines ``heard`` in the
+    recording; with neither there is no singing to keep), remove, or instrument (the melody
+    played instead of sung). With no ``words`` the recording keeps its own style. ``closeness``
+    (close, standard, free) is the person's own choice; else the producer's, at least standard
+    when the recording's words are sung again (they must still fit its tune)."""
     heard = list(heard)
-    singing = vocals == "keep" and bool(heard)
-    data, model = await _ask(COVER_SYSTEM, _cover_asking(words, facts, title, vocals, heard, lang), user, talk)
+    given = lyric_lines.tagged(lyrics) if vocals == "keep" else ""
+    singing = vocals == "keep" and bool(given or heard)
+    asking = _cover_asking(words, facts, title, vocals, [] if given else heard, lang, given, closeness)
+    data, model = await _ask(COVER_SYSTEM, asking, user, talk)
     caption = str(data.get("caption") or words or "a faithful new version of the same song, its own style and instruments")[:600]
     if singing:
-        sung, caption = _sung_again(data.get("lyrics"), heard), _voiced(caption)
+        sung, caption = given[:4000] if given else _sung_again(data.get("lyrics"), heard), _voiced(caption)
     else:
         sung = "[Instrumental]"
         if "instrumental" not in caption.lower():
             caption = "instrumental, no vocals, " + caption
-    # Sung words must still fit the recording's tune, and so must a tune given to an instrument.
-    low = 0.7 if singing else 0.6 if vocals == "instrument" else 0.5
-    spec = {
-        "task": "cover",
-        "caption": caption,
-        "lyrics": sung,
-        "cover_strength": _number(data.get("cover_strength"), low, 1.0, 0.8 if words else 1.0),
-    }
+    if closeness in LEVELS:
+        level = closeness
+    else:
+        level = _level(data, "standard" if singing else "free", "standard" if words else "close")
+    spec = {"task": "cover", "caption": caption, "lyrics": sung, "cover_strength": LEVELS[level]}
     return spec, str(data.get("title") or title)[:60], model, str(data.get("why") or "")[:200]

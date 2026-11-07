@@ -180,6 +180,14 @@ def making(draft: str) -> dict[str, Any] | None:
     return found if isinstance(found, dict) else None
 
 
+def update_making(draft: str, **fields: Any) -> None:
+    """Adds to a take's making record (what was measured in it afterwards)."""
+    now = making(draft)
+    path = making_path(draft)
+    if now is not None and path is not None:
+        path.write_text(json.dumps({**now, **fields}, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
 def update(draft: str, **fields: Any) -> None:
     now = info(draft)
     path = _folder(draft)

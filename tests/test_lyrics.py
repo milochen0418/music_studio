@@ -128,3 +128,25 @@ def test_a_line_heard_holds_until_it_is_sung_then_leaves_the_screen():
     shown = lyrics.shown([Line(10, "a", end=12.0, heard=True), Line(40, "b", end=43.0, heard=True)], 60)
     a = next(cue for cue in shown if cue[2] == "a")
     assert a[0] == 10 and 12.5 <= a[1] <= 13.5, a
+
+
+def test_lyrics_get_section_tags_and_a_part_sung_again_is_a_chorus():
+    text = lyrics.tagged("霓虹劃過\n引擎咆哮\n\n最後一圈\n踩到底\n\n轉彎\n\n最後一圈\n踩到底")
+    assert text == "[Verse 1]\n霓虹劃過\n引擎咆哮\n\n[Chorus]\n最後一圈\n踩到底\n\n[Verse 2]\n轉彎\n\n[Chorus]\n最後一圈\n踩到底"
+    assert lyrics.tagged("[Intro]\nhey\n\n[Chorus]\nla la") == "[Intro]\nhey\n\n[Chorus]\nla la", "tags already there stay"
+    assert lyrics.tagged("[00:01.00]one\n[00:03.00]two") == "[Verse 1]\none\ntwo" and lyrics.tagged("  \n") == ""
+
+
+def test_timed_lyrics_become_plain_lines_in_parts():
+    assert lyrics.from_lrc_text("[00:00.04] Por los\n[00:05.40] \n[00:18.01] Lydia 迷離\n[00:23.10] 為何流浪\n[01:21.32] ") == "Por los\n\nLydia 迷離\n為何流浪"
+
+
+def test_what_is_heard_in_simplified_is_written_as_in_taiwan():
+    assert lyrics.traditional("为何流浪 心碎的海洋 受了伤 软件") == "為何流浪 心碎的海洋 受了傷 軟體"
+    assert lyrics.traditional("Lydia 迷離的眼眶") == "Lydia 迷離的眼眶" and lyrics.traditional("") == ""
+
+
+def test_the_language_lyrics_are_written_in():
+    assert lyrics.script_language("Por los momentos difíciles\nLydia 迷離的眼眶 為何流浪 心碎的海洋") == "zh"
+    assert lyrics.script_language("こんにちは世界") == "ja" and lyrics.script_language("안녕하세요 여러분") == "ko"
+    assert lyrics.script_language("Por los momentos difíciles") == "en" and lyrics.script_language("123") == ""

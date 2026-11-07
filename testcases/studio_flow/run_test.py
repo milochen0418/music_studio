@@ -1,6 +1,7 @@
 """The studio from a person's side: say what a piece is for, get two takes that really play, keep one,
 and find it in the shared library with its loop points and how it was made; read that record (who
-decided, what went to the composer) and copy it; then change that piece into a new take."""
+decided, what went to the composer) and copy it; make it again with the same settings; then
+change that piece into a new take."""
 
 import json
 import os
@@ -74,6 +75,21 @@ with sync_playwright() as pw:
     page.click("[data-testid=making-close]")
     wait_for(lambda: page.locator("[data-testid=making-dialog]").count() == 0, "the record closes")
 
+    # The same piece again: the same brief, a new seed (the composer needs no engine).
+    first = page.locator("[data-testid=take]").first
+    title = first.locator("div.truncate").first.inner_text()
+    before = page.locator("[data-testid=take]").count()
+    first.locator("[data-testid=again]").click()
+    wait_for(lambda: page.locator("[data-testid=take]").count() > before, "the piece made again", 120)
+    again = page.locator("[data-testid=take]").first
+    assert again.locator("div.truncate").first.inner_text() == f"{title} #2"
+    again.locator("[data-testid=making]").click()
+    page.wait_for_selector("[data-testid=making-dialog]")
+    record = page.inner_text("[data-testid=making-dialog]")
+    assert f"同樣設定再做一次（來自「{title}」）" in record and "seed:" in record, record[:300]
+    page.click("[data-testid=making-close]")
+    assert again.locator("[data-testid=patch]").count() == 0, "the composer's pieces have no part to remake"
+
     page.click("[data-testid=tab-remake]")
     page.wait_for_selector("[data-testid=source]", timeout=15000)
     page.locator("[data-testid=source]").first.click()
@@ -97,6 +113,20 @@ with sync_playwright() as pw:
     page.click("[data-testid=change]")
     wait_for(lambda: page.locator("[data-testid=take]").count() > before, "the changed take", 120)
     shot(page, "03_changed")
+
+    # A recording of one's own: somebody else's unless the person says it is theirs.
+    page.fill("[data-testid=how]", "")
+    page.locator("#song input[type=file]").set_input_files(str(manifests[0].parent.parent / "piece.mp3"))  # the piece kept above
+    wait_for(lambda: page.locator("[data-testid=upload-own]").count() == 1, "asked whether it is one's own")
+    for own in (False, True):
+        if own:
+            page.click("[data-testid=upload-own]")
+            wait_for(lambda: page.locator("[data-testid=upload-own]").get_attribute("data-state") == "checked", "ticked")
+        before = page.locator("[data-testid=take]").count()
+        page.click("[data-testid=change]")
+        wait_for(lambda: page.locator("[data-testid=take]").count() > before, "the uploaded song changed", 120)
+        marked = "僅限自用" in page.locator("[data-testid=take]").first.inner_text()
+        assert marked != own, f"own={own}: marked as somebody else's={marked}"
     browser.close()
 log("output:", OUTPUT_DIR)
 finish(errors)

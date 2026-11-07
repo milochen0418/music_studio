@@ -19,6 +19,7 @@ pillow = ">=11"
 # The AI listens to a song to time its lyrics: Whisper on the CPU, and Chinese matched by its sound.
 faster-whisper = ">=1.1"
 pypinyin = ">=0.53"
+opencc = ">=1.1.9"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
